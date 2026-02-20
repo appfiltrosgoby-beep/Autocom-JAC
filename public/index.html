@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AUTOCOM - QR Scanner</title>
+    
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="/manifest.json">
+    
+    <!-- App Icons -->
+    <link rel="icon" type="image/png" href="/assets/images/icon-192.png">
+    <link rel="apple-touch-icon" href="/assets/images/icon-192.png">
+    
+    <!-- Meta Tags -->
+    <meta name="theme-color" content="#C41E3A">
+    <meta name="description" content="Sistema QR Scanner para AUTOCOM">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="AUTOCOM">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    
+    <link rel="stylesheet" href="assets/css/styles.css">
+    <!-- Librería html5-qrcode para escaneo de QR -->
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    <!-- Librería Chart.js para gráficas -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <!-- Contenedor principal -->
+    <div class="container">
+        <!-- Encabezado -->
+        <header class="header">
+            <div class="header-content">
+                <div class="logo">
+                    <svg width="50" height="50" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+                        <!-- Logo Autocom estilizado -->
+                        <circle cx="50" cy="50" r="40" fill="none" stroke="#C41E3A" stroke-width="3"/>
+                        <circle cx="30" cy="30" r="8" fill="#C41E3A"/>
+                        <circle cx="70" cy="30" r="8" fill="#C41E3A"/>
+                        <circle cx="20" cy="50" r="8" fill="#C41E3A"/>
+                        <circle cx="80" cy="50" r="8" fill="#C41E3A"/>
+                        <circle cx="30" cy="70" r="8" fill="#C41E3A"/>
+                        <circle cx="70" cy="70" r="8" fill="#C41E3A"/>
+                    </svg>
+                    <h1>AUTOCOM</h1>
+                </div>
+                <div class="header-stats mobile-hidden">
+                    <div class="stat-item">
+                        <span class="stat-label">Total</span>
+                        <span class="stat-value" id="totalScans">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Hoy</span>
+                        <span class="stat-value" id="todayScans">0</span>
+                    </div>
+                </div>
+                <button id="logoutBtn" class="btn-logout" title="Cambiar rol">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+                        <polyline points="16 17 21 12 16 7"/>
+                        <line x1="21" y1="12" x2="9" y2="12"/>
+                    </svg>
+                    <span id="currentRole" class="role-badge"></span>
+                </button>
+            </div>
+        </header>
+
+        <!-- Contenido principal -->
+        <main class="main-content">
+            <!-- Vista: Escáner (por defecto) -->
+            <section id="scannerView" class="view active">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>📸 ESCANEA EL CODIGO QR</h2>
+                    </div>
+                    <div class="card-body">
+                        <!-- Selector de cliente (solo para usuarios planta) -->
+                        <div id="clientSelectorContainer" class="client-selector-container hidden">
+                            <label for="selectedClient">Selecciona Cliente:</label>
+                            <select id="selectedClient" class="input-filter">
+                                <option value="">-- Seleccionar Cliente --</option>
+                            </select>
+                        </div>
+
+                        <!-- Área del escáner -->
+                        <div id="reader" class="qr-reader"></div>
+                        
+                        <!-- Controles del escáner -->
+                        <div class="scanner-controls">
+                            <button id="startBtn" class="btn btn-primary">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                    <circle cx="12" cy="12" r="10"/>
+                                    <path d="M9.5 9l5 3-5 3z"/>
+                                </svg>
+                                Iniciar Escaneo
+                            </button>
+                            <button id="stopBtn" class="btn btn-secondary" disabled>
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                    <circle cx="12" cy="12" r="10"/>
+                                    <rect x="9" y="9" width="6" height="6"/>
+                                </svg>
+                                Detener
+                            </button>
+                        </div>
+
+                        <!-- Estado del escáner -->
+                        <div id="scannerStatus" class="scanner-status"></div>
+
+                        <!-- Último resultado -->
+                        <div id="lastResult" class="last-result hidden">
+                            <div class="result-header">
+                                <h3>✅ Último escaneo</h3>
+                                <button id="clearResult" class="btn-icon">×</button>
+                            </div>
+                            <div class="result-content">
+                                <div class="result-type" id="resultType"></div>
+                                <div class="result-data" id="resultData"></div>
+                                <div class="result-meta" id="resultMeta"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Vista: Registros -->
+            <section id="recordsView" class="view">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>📋 Registros Recientes</h2>
+                        <div class="header-actions">
+                            <select 
+                                id="filterClienteRecords" 
+                                class="input-filter"
+                                style="display:none;"
+                            >
+                                <option value="">Todos los clientes</option>
+                            </select>
+                            <button id="refreshBtn" class="btn btn-icon-text">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                    <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                                </svg>
+                                Actualizar
+                            </button>
+                            <button id="exportBtn" class="btn btn-icon-text">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+                                </svg>
+                                Exportar
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <!-- Tabla de registros -->
+                        <div class="table-container">
+                            <table id="recordsTable" class="records-table">
+                                <thead>
+                                    <tr>
+                                        <th>Referencia</th>
+                                        <th>Serial</th>
+                                        <th>Estado</th>
+                                        <th class="cliente-col" style="display:none;">Cliente</th>
+                                        <th class="usuario-col">Usuario</th>
+                                        <th class="usuario-inst-col" style="display:none;">Usuario Instalación</th>
+                                        <th class="usuario-desinst-col" style="display:none;">Usuario Desinstalación</th>
+                                        <th class="fecha-almacen-col">Fecha Almacén</th>
+                                        <th class="fecha-despacho-col">Fecha Despacho</th>
+                                        <th class="fecha-inst-col" style="display:none;">Fecha Instalación</th>
+                                        <th class="fecha-desinst-col" style="display:none;">Fecha Desinstalación</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="recordsBody">
+                                    <tr>
+                                        <td colspan="9" class="no-data">
+                                            No hay registros para mostrar
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Vista: Estadísticas -->
+            <section id="statsView" class="view">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>📊 Estadísticas</h2>
+                    </div>
+                    <div class="card-body">
+                        <!-- Resumen de estadísticas -->
+                        <div id="statsContainer" class="stats-grid">
+                            <p class="no-data">Cargando estadísticas...</p>
+                        </div>
+
+                        <!-- Total de registros -->
+                        <div class="total-card">
+                            <div class="total-icon">📋</div>
+                            <div class="total-info">
+                                <span class="total-label" id="totalLabel">Total de Registros</span>
+                                <span class="total-count" id="totalCount">0</span>
+                            </div>
+                        </div>
+
+                        <!-- Separador -->
+                        <hr style="margin: 2rem 0; border: none; border-top: 1px solid #e5e7eb;">
+
+                        <!-- Filtro y exportación -->
+                        <div class="stats-controls">
+                            <select 
+                                id="filterClienteStats" 
+                                class="input-filter"
+                                style="display:none;"
+                            >
+                                <option value="">Todos los clientes</option>
+                            </select>
+                            <select 
+                                id="filterReferencia" 
+                                class="input-filter"
+                            >
+                                <option value="">Todas las referencias</option>
+                            </select>
+                            <button id="exportStatsBtn" class="btn btn-icon-text">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+                                </svg>
+                                Exportar Datos
+                            </button>
+                        </div>
+
+                        <!-- Tabla de datos filtrados -->
+                        <div class="table-container">
+                            <table id="statsTable" class="records-table">
+                                <thead>
+                                    <tr>
+                                        <th>Referencia</th>
+                                        <th>Serial</th>
+                                        <th>Estado</th>
+                                        <th class="cliente-col" style="display:none;">Cliente</th>
+                                        <th>Fecha Almacén</th>
+                                        <th>Fecha Despacho</th>
+                                        <th>Fecha Instalación</th>
+                                        <th>Fecha Desinstalación</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="statsTableBody">
+                                    <tr>
+                                        <td colspan="7" class="no-data">
+                                            No hay datos para mostrar
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Vista: Usuarios (solo superadmin) -->
+            <section id="usersView" class="view">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>👥 Gestión de Usuarios</h2>
+                    </div>
+                    <div class="card-body">
+                        <div class="user-form">
+                            <input type="text" id="newUserUsername" placeholder="Usuario" class="input-password" required>
+                            <input type="password" id="newUserPassword" placeholder="Contraseña" class="input-password" required>
+                            <select id="newUserClient" class="input-filter" required>
+                                <option value="">-- Seleccionar Cliente --</option>
+                            </select>
+                            <select id="newUserType" class="input-filter">
+                                <option value="administrador">Administrador</option>
+                                <option value="mecanico">Mecánico</option>
+                                <option value="despacho">Despacho</option>
+                                <option value="super">Super Admin</option>
+                            </select>
+                            <div style="display: flex; gap: 10px;">
+                                <button id="createUserBtn" class="btn btn-primary" style="flex: 1;">Crear Usuario</button>
+                                <button id="updateUserBtn" class="btn btn-secondary hidden" style="flex: 1;">Actualizar Usuario</button>
+                                <button id="cancelEditBtn" class="btn btn-secondary hidden">Cancelar</button>
+                            </div>
+                        </div>
+                        <div id="userFormError" class="error-message hidden"></div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h2>📄 Usuarios registrados</h2>
+                        <div class="header-actions">
+                            <select 
+                                id="filterClienteUsers" 
+                                class="input-filter"
+                                style="display:none;"
+                            >
+                                <option value="">Todos los clientes</option>
+                            </select>
+                            <button id="refreshUsersBtn" class="btn btn-icon-text">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                    <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                                </svg>
+                                Actualizar
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-container">
+                            <table id="usersTable" class="records-table">
+                                <thead>
+                                    <tr>
+                                        <th>Usuario</th>
+                                        <th>Tipo</th>
+                                        <th>Cliente</th>
+                                        <th class="acciones-col">Acciones</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="usersBody">
+                                    <tr>
+                                        <td colspan="4" class="no-data">
+                                            No hay usuarios para mostrar
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Vista: Clientes (solo superadmin) -->
+            <section id="clientsView" class="view">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>🏢 Gestión de Clientes</h2>
+                    </div>
+                    <div class="card-body">
+                        <div class="user-form">
+                            <input type="text" id="newClientName" placeholder="Nombre del Cliente" class="input-password" required>
+                            <div style="display: flex; gap: 10px;">
+                                <button id="createClientBtn" class="btn btn-primary" style="flex: 1;">Crear Cliente</button>
+                                <button id="updateClientBtn" class="btn btn-secondary hidden" style="flex: 1;">Actualizar Cliente</button>
+                                <button id="cancelEditClientBtn" class="btn btn-secondary hidden">Cancelar</button>
+                            </div>
+                        </div>
+                        <div id="clientFormError" class="error-message hidden"></div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h2>📄 Clientes registrados</h2>
+                        <div class="header-actions">
+                            <button id="refreshClientsBtn" class="btn btn-icon-text">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                    <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                                </svg>
+                                Actualizar
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-container">
+                            <table id="clientsTable" class="records-table">
+                                <thead>
+                                    <tr>
+                                        <th>Cliente</th>
+                                        <th>Acciones</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="clientsBody">
+                                    <tr>
+                                        <td colspan="2" class="no-data">
+                                            No hay clientes para mostrar
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Vista: Proyecciones (solo superadmin) -->
+            <section id="projectionsView" class="view">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>📊 Proyecciones de Pedidos y Duración de Filtros</h2>
+                        <div class="header-actions">
+                            <select id="filterClienteProjections" class="input-filter">
+                                <option value="">Todos los clientes</option>
+                            </select>
+                            <select id="filterReferenciaProjections" class="input-filter">
+                                <option value="">Todas las referencias</option>
+                            </select>
+                            <button id="refreshProjectionsBtn" class="btn btn-icon-text">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                    <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+                                </svg>
+                                Actualizar
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <!-- Gráficas -->
+                        <div class="charts-container">
+                            <div class="chart-card">
+                                <h3>📈 Proyección de Pedidos por Mes</h3>
+                                <div class="chart-wrapper">
+                                    <canvas id="ordersProjectionChart"></canvas>
+                                </div>
+                            </div>
+                            <div class="chart-card">
+                                <h3>⏱️ Duración Promedio por Filtro (Km)</h3>
+                                <div class="chart-wrapper chart-wrapper-large">
+                                    <canvas id="filterDurationChart"></canvas>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Tabla: Próximos Cambios -->
+                        <div style="margin-bottom: 30px;">
+                            <h3 style="margin-bottom: 15px;">⏰ Próximos Cambios de Filtro</h3>
+                            <div class="table-container">
+                                <table class="records-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Cliente</th>
+                                            <th>Referencia</th>
+                                            <th>Instalado Desde</th>
+                                            <th>Duración Promedio</th>
+                                            <th>Est. Cambio</th>
+                                            <th>Placa</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="ordersProjectionBody">
+                                        <tr>
+                                            <td colspan="6" class="no-data">Cargando próximos cambios...</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- Estadísticas Resumen -->
+                        <div style="margin-top: 30px; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                            <div class="stat-card">
+                                <div class="stat-label">Promedio Días Duración</div>
+                                <div class="stat-value" id="avgDaysDuration">-</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-label">Históricos Analizados</div>
+                                <div class="stat-value" id="totalFiltersAnalyzed">-</div>
+                            </div>
+                            <div class="stat-card">
+                                <div class="stat-label">Próximos Cambios</div>
+                                <div class="stat-value" id="nextMonthOrders">-</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Menú de navegación móvil -->
+        <nav class="bottom-nav">
+            <button class="nav-item active" data-view="scannerView">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                    <circle cx="12" cy="13" r="4"/>
+                </svg>
+                <span>Escanear</span>
+            </button>
+            <button class="nav-item" data-view="recordsView">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                    <polyline points="14 2 14 8 20 8"/>
+                    <line x1="16" y1="13" x2="8" y2="13"/>
+                    <line x1="16" y1="17" x2="8" y2="17"/>
+                </svg>
+                <span>Registros</span>
+            </button>
+            <button class="nav-item" data-view="statsView">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="12" y1="20" x2="12" y2="10"/>
+                    <line x1="18" y1="20" x2="18" y2="4"/>
+                    <line x1="6" y1="20" x2="6" y2="16"/>
+                </svg>
+                <span>Estadísticas</span>
+            </button>
+            <button class="nav-item" data-view="usersView">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                    <circle cx="9" cy="7" r="4"/>
+                    <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+                    <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                </svg>
+                <span>Usuarios</span>
+            </button>
+            <button class="nav-item" data-view="clientsView">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="2" y="7" width="20" height="14" rx="2" ry="2"/>
+                    <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>
+                </svg>
+                <span>Clientes</span>
+            </button>
+            <button class="nav-item" data-view="projectionsView">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="18" y1="20" x2="18" y2="10"/>
+                    <line x1="12" y1="20" x2="12" y2="4"/>
+                    <line x1="6" y1="20" x2="6" y2="14"/>
+                </svg>
+                <span>Proyecciones</span>
+            </button>
+        </nav>
+
+        <!-- Notificaciones toast -->
+        <div id="toastContainer" class="toast-container"></div>
+
+        <!-- Modal de Login/Selector de Rol -->
+        <div id="loginModal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <svg width="80" height="80" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" class="modal-logo">
+                        <!-- Logo Autocom estilizado -->
+                        <circle cx="50" cy="50" r="40" fill="none" stroke="#C41E3A" stroke-width="3"/>
+                        <circle cx="30" cy="30" r="8" fill="#C41E3A"/>
+                        <circle cx="70" cy="30" r="8" fill="#C41E3A"/>
+                        <circle cx="20" cy="50" r="8" fill="#C41E3A"/>
+                        <circle cx="80" cy="50" r="8" fill="#C41E3A"/>
+                        <circle cx="30" cy="70" r="8" fill="#C41E3A"/>
+                        <circle cx="70" cy="70" r="8" fill="#C41E3A"/>
+                    </svg>
+                    <h2>AUTOCOM QR SCANNER</h2>
+                    <p>Selecciona tu rol para continuar</p>
+                </div>
+                <div class="modal-body">
+                    <button id="loginUserBtn" class="btn btn-large btn-primary">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                            <circle cx="12" cy="7" r="4"/>
+                        </svg>
+                        Mecánico
+                    </button>
+                    <button id="loginAdminBtn" class="btn btn-large btn-secondary">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                            <polyline points="2 17 12 22 22 17"/>
+                            <polyline points="2 12 12 17 22 12"/>
+                        </svg>
+                        Administrador
+                    </button>
+                </div>
+                <!-- Formulario de login para mecánico (oculto por defecto) -->
+                <form id="userLoginForm" class="password-form hidden" autocomplete="on">
+                    <input type="text" id="userUsername" placeholder="Usuario mecánico" class="input-password" autocomplete="username">
+                    <div class="password-container">
+                        <input type="password" id="userPassword" placeholder="Contraseña" class="input-password" autocomplete="current-password">
+                        <button type="button" class="toggle-password-btn" data-target="userPassword">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                <circle cx="12" cy="12" r="3"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="password-actions">
+                        <button id="cancelUserBtn" type="button" class="btn btn-secondary">Cancelar</button>
+                        <button id="submitUserBtn" type="button" class="btn btn-primary">Continuar</button>
+                    </div>
+                    <div id="userError" class="error-message hidden"></div>
+                </form>
+                <!-- Formulario de login para administrador (oculto por defecto) -->
+                <form id="adminLoginForm" class="password-form hidden" autocomplete="on">
+                    <input type="text" id="adminUsername" placeholder="Usuario administrador" class="input-password" autocomplete="username">
+                    <div class="password-container">
+                        <input type="password" id="adminPassword" placeholder="Contraseña" class="input-password" autocomplete="current-password">
+                        <button type="button" class="toggle-password-btn" data-target="adminPassword">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                                <circle cx="12" cy="12" r="3"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="password-actions">
+                        <button id="cancelAdminEmailBtn" type="button" class="btn btn-secondary">Cancelar</button>
+                        <button id="submitAdminEmailBtn" type="button" class="btn btn-primary">Continuar</button>
+                    </div>
+                    <div id="adminError" class="error-message hidden"></div>
+                </form>
+                <div id="passwordError" class="error-message hidden"></div>
+            </div>
+        </div>
+
+        <!-- Modal de Instalación (Tercer Escaneo) -->
+        <div id="instalacionModal" class="modal" style="display: none;">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>🔧 Datos de Instalación</h2>
+                    <p>Completa los datos para marcar el producto como INSTALADO</p>
+                </div>
+                <div class="modal-body">
+                    <div id="instalacionFormContainer" class="password-form">
+                        <input type="text" id="instalacionPlaca" placeholder="Placa del vehículo" class="input-text, input-password" required autocomplete="off">
+                        <input type="number" id="instalacionKilometraje" placeholder="Kilometraje de instalación" class="input-text, input-password" required autocomplete="off" min="0">
+                        <input type="text" id="instalacionInstalador" placeholder="Nombre del instalador" class="input-text, input-password" required autocomplete="off">
+                        <div class="password-actions">
+                            <button id="instalacionCancelarBtn" class="btn btn-secondary" type="button">Cancelar</button>
+                            <button id="instalacionGuardarBtn" class="btn btn-primary" type="button">Confirmar Instalación</button>
+                        </div>
+                        <div id="instalacionErrorMsg" class="error-message hidden"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Modal de Desinstalación -->
+        <div id="desinstalacionModal" class="modal" style="display: none;">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>📤 Datos de Desinstalación</h2>
+                    <p>Completa los datos para marcar el producto como DESINSTALADO</p>
+                </div>
+                <div class="modal-body">
+                    <form id="desinstalacionForm" class="password-form">
+                        <input type="number" id="kilometrajeDesinstalacionInput" placeholder="Kilometraje de desinstalación" class="input-password" required autocomplete="off" min="0">
+                        <div class="password-actions">
+                            <button id="cancelDesinstalacionBtn" type="button" class="btn btn-secondary">Cancelar</button>
+                            <button id="submitDesinstalacionBtn" type="button" class="btn btn-primary">Confirmar Desinstalación</button>
+                        </div>
+                        <div id="desinstalacionError" class="error-message hidden"></div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Script principal -->
+    <script src="assets/js/app.js"></script>
+</body>
+</html>

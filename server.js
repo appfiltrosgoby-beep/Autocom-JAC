@@ -1,0 +1,2166 @@
+/**
+ * Servidor Backend - QR Scanner App
+ * Maneja las solicitudes del frontend y la integración con Google Sheets
+ */
+
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const bodyParser = require('body-parser');
+const compression = require('compression');
+const { GoogleSpreadsheet } = require('google-spreadsheet');
+const { JWT } = require('google-auth-library');
+
+// Validar variables de entorno críticas
+const requiredEnvVars = ['GOOGLE_CLIENT_EMAIL', 'GOOGLE_PRIVATE_KEY', 'GOOGLE_SPREADSHEET_ID'];
+const missingEnvVars = requiredEnvVars.filter(envVar => !process.env[envVar]);
+
+if (missingEnvVars.length > 0) {
+  console.warn('⚠️ ADVERTENCIA: Variables de entorno faltantes:', missingEnvVars);
+  console.warn('⚠️ El servidor se iniciará pero las rutas de Google Sheets fallarán.');
+  console.warn('⚠️ Por favor, configura estas variables en tu archivo .env o en Render');
+}
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+const path = require('path');
+
+// Middlewares
+app.use(cors());
+app.use(compression()); // Comprimir respuestas
+app.use(bodyParser.json());
+
+// Debug: Log de rutas
+const publicPath = path.join(__dirname, 'public');
+console.log('📁 Public path:', publicPath);
+
+// Middleware para servir archivos estáticos con cache apropiado
+app.use(express.static(publicPath, {
+  maxAge: '1d',
+  etag: false,
+  setHeaders: (res, path) => {
+    // No cachear HTML, JSON y JS de manera agresiva
+    if (path.endsWith('.html') || path.endsWith('.json') || path.endsWith('.js')) {
+      res.set('Cache-Control', 'public, max-age=3600, must-revalidate');
+    }
+    // Cachear imágenes por más tiempo
+    if (path.endsWith('.png') || path.endsWith('.svg')) {
+      res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    }
+  }
+}));
+
+// Servir manifest.json con el content-type correcto
+app.get('/manifest.json', (req, res) => {
+  res.type('application/manifest+json');
+  res.set('Cache-Control', 'public, max-age=3600, must-revalidate');
+  res.sendFile(path.join(publicPath, 'manifest.json'));
+});
+
+// Servir Service Worker
+app.get('/service-worker.js', (req, res) => {
+  res.type('application/javascript; charset=utf-8');
+  res.set('Cache-Control', 'public, max-age=3600, must-revalidate');
+  res.set('Service-Worker-Allowed', '/');
+  res.sendFile(path.join(publicPath, 'service-worker.js'));
+});
+
+// Servir browserconfig.xml
+app.get('/browserconfig.xml', (req, res) => {
+  res.type('application/xml');
+  res.set('Cache-Control', 'public, max-age=86400');
+  res.sendFile(path.join(publicPath, 'browserconfig.xml'));
+});
+
+// Health check para Render
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ status: 'ok', message: 'Servidor funcionando correctamente' });
+});
+
+/**
+ * Valida un usuario contra la hoja USUARIOS
+ * POST /api/validate-user
+ * Body: { usuario, tipo, password }
+ */
+app.post('/api/validate-user', async (req, res) => {
+  try {
+    const { usuario, tipo, password } = req.body;
+
+    if (!usuario || !tipo || !password) {
+      return res.status(400).json({ success: false, message: 'Usuario, tipo y contraseña son requeridos' });
+    }
+
+    const doc = await getGoogleSheet();
+    const normalizedUser = normalizeUser(usuario);
+    const normalizedType = normalizeType(tipo);
+
+    // Buscar usuario en hoja global (para superadmins)
+    let userRow = null;
+    let userClient = '';
+    const globalSheet = await getOrCreateUsersSheet(doc);
+    userRow = await validateUserCredentials(globalSheet, normalizedUser, password);
+    
+    if (userRow) {
+      userClient = userRow.get('CLIENTE') || '';
+    } else {
+      // Buscar en todas las hojas de clientes
+      await doc.loadInfo();
+      for (const sheet of doc.sheetsByIndex) {
+        if (sheet.title.endsWith('_USUARIOS')) {
+          userRow = await validateUserCredentials(sheet, normalizedUser, password);
+          if (userRow) {
+            userClient = userRow.get('CLIENTE') || '';
+            break;
+          }
+        }
+      }
+    }
+
+    if (!userRow) {
+      return res.json({ success: false, message: 'Usuario no autorizado' });
+    }
+
+    const storedType = normalizeType(userRow.get('TIPO'));
+
+    // Validar tipo de usuario según el flujo de login
+    if (normalizedType === 'user') {
+      // Flujo "usuarios": acepta mecánico y despacho
+      if (!['mecanico', 'despacho'].includes(storedType)) {
+        return res.json({ success: false, message: 'Tipo no autorizado para acceso de usuarios' });
+      }
+    } else if (normalizedType === 'administrador') {
+      // Flujo "administrador": acepta administrador y superadmin
+      if (storedType !== 'administrador' && storedType !== 'super') {
+        return res.json({ success: false, message: 'Tipo no autorizado para acceso de administrador' });
+      }
+    } else {
+      // Otros flujos: tipo debe coincidir exactamente
+      if (storedType !== normalizedType) {
+        return res.json({ success: false, message: 'Tipo no autorizado' });
+      }
+    }
+
+    // Determinar el rol basado en el TIPO del usuario
+    let role = 'user';
+    if (storedType === 'super') {
+      role = 'superadmin';
+    } else if (storedType === 'administrador') {
+      role = 'admin';
+    } else if (storedType === 'despacho') {
+      role = 'dispatch';
+    }
+    // mecánico e despacho inician sesión como 'user' o 'dispatch'
+    
+    return res.json({ 
+      success: true, 
+      tipo: storedType, 
+      usuario: normalizedUser, 
+      role,
+      cliente: userClient 
+    });
+  } catch (error) {
+    console.error('Error al validar usuario:', error);
+    res.status(500).json({ success: false, error: 'Error al validar usuario' });
+  }
+});
+
+/**
+ * Lista usuarios (solo superadmin)
+ * GET /api/users
+ */
+app.get('/api/users', async (req, res) => {
+  try {
+    const doc = await getGoogleSheet();
+
+    const authUser = req.headers['x-auth-user'] || '';
+    const authPassword = req.headers['x-auth-password'] || '';
+    
+    // Validar que el usuario autenticado sea superadmin o administrador
+    const authData = await validateAdminOrSuperadminCredentials(doc, authUser, authPassword);
+    if (!authData) {
+      return res.status(401).json({ success: false, message: 'No autorizado' });
+    }
+
+    const { tipo: authTipo, cliente: authCliente } = authData;
+    const globalSheet = await getOrCreateUsersSheet(doc);
+
+    await doc.loadInfo();
+    const allUsers = [];
+    
+    if (authTipo === 'super') {
+      // Superadmin solo ve usuarios de la hoja global USUARIOS
+      const globalRows = await globalSheet.getRows();
+      for (const row of globalRows) {
+        allUsers.push({
+          usuario: normalizeUser(row.get('USUARIO')),
+          tipo: normalizeType(row.get('TIPO')),
+          cliente: row.get('CLIENTE') || ''
+        });
+      }
+    } else {
+      // Administrador solo puede ver usuarios de su cliente
+      const clientSheet = await getOrCreateClientUsersSheet(doc, authCliente);
+      const rows = await clientSheet.getRows();
+      for (const row of rows) {
+        allUsers.push({
+          usuario: normalizeUser(row.get('USUARIO')),
+          tipo: normalizeType(row.get('TIPO')),
+          cliente: row.get('CLIENTE') || ''
+        });
+      }
+    }
+
+    res.json({ success: true, data: allUsers });
+  } catch (error) {
+    console.error('Error al listar usuarios:', error);
+    res.status(500).json({ success: false, error: 'Error al listar usuarios' });
+  }
+});
+
+/**
+ * Crea o actualiza un usuario (solo superadmin)
+ * POST /api/users
+ * Body: { usuario, tipo, password, cliente, authUser, authPassword }
+ */
+app.post('/api/users', async (req, res) => {
+  try {
+    const { usuario, tipo, password, cliente, authUser, authPassword } = req.body;
+
+    const normalizedUser = normalizeUser(usuario);
+    const normalizedType = normalizeType(tipo);
+    const normalizedClient = normalizeClient(cliente);
+
+    if (!normalizedUser || !normalizedType || !password) {
+      return res.status(400).json({ success: false, message: 'Usuario, tipo y contraseña son requeridos' });
+    }
+
+    if (!normalizedClient && normalizedType !== 'super') {
+      return res.status(400).json({ success: false, message: 'Cliente es requerido para usuarios no superadmin' });
+    }
+
+    if (!['administrador', 'mecanico', 'despacho', 'super'].includes(normalizedType)) {
+      return res.status(400).json({ success: false, message: 'Tipo inválido' });
+    }
+
+    const doc = await getGoogleSheet();
+
+    // Validar que el usuario autenticado sea superadmin o administrador
+    const authData = await validateAdminOrSuperadminCredentials(doc, authUser, authPassword);
+    if (!authData) {
+      return res.status(401).json({ success: false, message: 'No autorizado' });
+    }
+
+    const { tipo: authTipo, cliente: authCliente } = authData;
+
+    // Validaciones adicionales para administradores
+    if (authTipo === 'administrador') {
+      // Admin no puede crear superadmins
+      if (normalizedType === 'super') {
+        return res.status(403).json({ success: false, message: 'Administrador no puede crear superadmins' });
+      }
+      // Admin solo puede crear usuarios de su propio cliente
+      if (normalizedClient !== authCliente) {
+        return res.status(403).json({ success: false, message: 'Solo puede crear usuarios de su cliente' });
+      }
+    }
+
+    const globalSheet = await getOrCreateUsersSheet(doc);
+
+    // Determinar en qué hoja guardar
+    let targetSheet;
+    if (normalizedType === 'super') {
+      // Superadmins se guardan en hoja global
+      targetSheet = globalSheet;
+    } else {
+      // Crear hojas del cliente si no existen
+      await getOrCreateClientUsersSheet(doc, normalizedClient);
+      await getOrCreateClientRecordsSheet(doc, normalizedClient);
+      targetSheet = await getOrCreateClientUsersSheet(doc, normalizedClient);
+    }
+
+    const rows = await targetSheet.getRows();
+    const existingRow = rows.find(row => normalizeUser(row.get('USUARIO')) === normalizedUser);
+
+    if (existingRow) {
+      existingRow.set('TIPO', normalizedType);
+      existingRow.set('CONTRASEÑA', password);
+      existingRow.set('CLIENTE', normalizedClient);
+      await existingRow.save();
+
+      return res.json({ success: true, message: 'Usuario actualizado' });
+    }
+
+    await targetSheet.addRow({
+      'USUARIO': normalizedUser,
+      'TIPO': normalizedType,
+      'CONTRASEÑA': password,
+      'CLIENTE': normalizedClient
+    });
+
+    // Guardar tambien en la hoja global USUARIOS para no-superadmins
+    if (normalizedType !== 'super') {
+      const globalRows = await globalSheet.getRows();
+      const globalUserRow = globalRows.find(row => normalizeUser(row.get('USUARIO')) === normalizedUser);
+      if (!globalUserRow) {
+        await globalSheet.addRow({
+          'USUARIO': normalizedUser,
+          'TIPO': normalizedType,
+          'CONTRASEÑA': password,
+          'CLIENTE': normalizedClient
+        });
+      }
+    }
+
+    res.json({ success: true, message: 'Usuario creado' });
+  } catch (error) {
+    console.error('Error al crear usuario:', error);
+    res.status(500).json({ success: false, error: 'Error al crear usuario' });
+  }
+});
+
+  /**
+   * Elimina un usuario (solo superadmin)
+   * DELETE /api/users/:usuario
+   */
+  app.delete('/api/users/:usuario', async (req, res) => {
+    try {
+      const { usuario } = req.params;
+      const authUser = req.headers['x-auth-user'];
+      const authPassword = req.headers['x-auth-password'];
+
+      const normalizedUser = normalizeUser(usuario);
+
+      if (!normalizedUser) {
+        return res.status(400).json({ success: false, message: 'Usuario es requerido' });
+      }
+
+      const doc = await getGoogleSheet();
+
+      // Validar que el usuario autenticado sea superadmin o administrador
+      const authData = await validateAdminOrSuperadminCredentials(doc, authUser, authPassword);
+      if (!authData) {
+        return res.status(401).json({ success: false, message: 'No autorizado' });
+      }
+
+      const { tipo: authTipo, cliente: authCliente } = authData;
+
+      const globalSheet = await getOrCreateUsersSheet(doc);
+
+      // Buscar el usuario que se va a eliminar para validar permisos
+      let rows = await globalSheet.getRows();
+      let userRow = rows.find(row => normalizeUser(row.get('USUARIO')) === normalizedUser);
+      let userCliente = '';
+      let userTipo = '';
+      
+      if (!userRow) {
+        // Buscar en hojas de clientes
+        await doc.loadInfo();
+        for (const sheet of doc.sheetsByIndex) {
+          if (sheet.title.endsWith('_USUARIOS')) {
+            rows = await sheet.getRows();
+            userRow = rows.find(row => normalizeUser(row.get('USUARIO')) === normalizedUser);
+            if (userRow) {
+              userCliente = userRow.get('CLIENTE') || '';
+              userTipo = normalizeType(userRow.get('TIPO'));
+              break;
+            }
+          }
+        }
+      } else {
+        userCliente = userRow.get('CLIENTE') || '';
+        userTipo = normalizeType(userRow.get('TIPO'));
+      }
+
+      if (!userRow) {
+        return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+      }
+
+      if (authTipo === 'administrador') {
+        return res.status(403).json({ success: false, message: 'Administrador no puede eliminar usuarios' });
+      }
+
+      // Eliminar el usuario
+      await userRow.delete();
+      
+      // Si el usuario también existe en la hoja global y estamos en una hoja de cliente, eliminarlo también
+      if (authTipo === 'super' && userTipo !== 'super') {
+        const globalRows = await globalSheet.getRows();
+        const globalUserRow = globalRows.find(row => normalizeUser(row.get('USUARIO')) === normalizedUser);
+        if (globalUserRow) {
+          await globalUserRow.delete();
+        }
+      }
+
+      return res.json({ success: true, message: 'Usuario eliminado correctamente' });
+    } catch (error) {
+      console.error('Error al eliminar usuario:', error);
+      res.status(500).json({ success: false, error: 'Error al eliminar usuario' });
+    }
+  });
+
+  /**
+   * Actualiza un usuario (solo superadmin)
+   * PUT /api/users/:usuario
+   */
+  app.put('/api/users/:usuario', async (req, res) => {
+    try {
+      const { usuario } = req.params;
+      const { tipo, password, cliente, authUser, authPassword } = req.body;
+
+      const normalizedUser = normalizeUser(usuario);
+      const normalizedType = normalizeType(tipo);
+      const normalizedClient = normalizeClient(cliente);
+
+      if (!normalizedUser || !normalizedType || !password) {
+        return res.status(400).json({ success: false, message: 'Usuario, tipo y contraseña son requeridos' });
+      }
+
+      if (!normalizedClient && normalizedType !== 'super') {
+        return res.status(400).json({ success: false, message: 'Cliente es requerido para usuarios no superadmin' });
+      }
+
+      const doc = await getGoogleSheet();
+
+      // Validar que el usuario autenticado sea superadmin o administrador
+      const authData = await validateAdminOrSuperadminCredentials(doc, authUser, authPassword);
+      if (!authData) {
+        return res.status(401).json({ success: false, message: 'No autorizado' });
+      }
+
+      const { tipo: authTipo, cliente: authCliente } = authData;
+
+      // Validaciones adicionales para administradores
+      if (authTipo === 'administrador') {
+        // Admin no puede editar superadmins
+        if (normalizedType === 'super') {
+          return res.status(403).json({ success: false, message: 'Administrador no puede crear/editar superadmins' });
+        }
+        // Admin solo puede editar usuarios de su propio cliente
+        if (normalizedClient !== authCliente) {
+          return res.status(403).json({ success: false, message: 'Solo puede editar usuarios de su cliente' });
+        }
+      }
+
+      const globalSheet = await getOrCreateUsersSheet(doc);
+
+      // Buscar usuario en la hoja global
+      let rows = await globalSheet.getRows();
+      let userRow = rows.find(row => normalizeUser(row.get('USUARIO')) === normalizedUser);
+    
+      if (userRow) {
+        userRow.set('TIPO', normalizedType);
+        userRow.set('CONTRASEÑA', password);
+        userRow.set('CLIENTE', normalizedClient);
+        await userRow.save();
+        return res.json({ success: true, message: 'Usuario actualizado correctamente' });
+      }
+
+      // Buscar en hojas de clientes
+      await doc.loadInfo();
+      for (const sheet of doc.sheetsByIndex) {
+        if (sheet.title.endsWith('_USUARIOS')) {
+          rows = await sheet.getRows();
+          userRow = rows.find(row => normalizeUser(row.get('USUARIO')) === normalizedUser);
+          if (userRow) {
+            userRow.set('TIPO', normalizedType);
+            userRow.set('CONTRASEÑA', password);
+            userRow.set('CLIENTE', normalizedClient);
+            await userRow.save();
+            return res.json({ success: true, message: 'Usuario actualizado correctamente' });
+          }
+        }
+      }
+
+      return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+    } catch (error) {
+      console.error('Error al actualizar usuario:', error);
+      res.status(500).json({ success: false, error: 'Error al actualizar usuario' });
+    }
+  });
+
+// Servir index.html desde la raíz (fallback para SPA)
+app.get('/', (req, res) => {
+    const indexPath = path.join(publicPath, 'index.html');
+    res.sendFile(indexPath);
+});
+
+// Configuración de Google Sheets
+const SCOPES = [
+  'https://www.googleapis.com/auth/spreadsheets',
+  'https://www.googleapis.com/auth/drive.file',
+];
+
+const RECORDS_SHEET_TITLE = 'REGISTROS';
+const USERS_SHEET_TITLE = 'USUARIOS';
+const SUPERADMIN_1_EMAIL = process.env.SUPERADMIN_1_EMAIL || '';
+const SUPERADMIN_2_EMAIL = process.env.SUPERADMIN_2_EMAIL || '';
+
+/**
+ * Inicializa y autentica la conexión con Google Sheets
+ * @returns {GoogleSpreadsheet} Documento de Google Sheets autenticado
+ */
+async function getGoogleSheet() {
+  try {
+    // Validar variables de entorno
+    if (!process.env.GOOGLE_CLIENT_EMAIL || !process.env.GOOGLE_PRIVATE_KEY || !process.env.GOOGLE_SPREADSHEET_ID) {
+      throw new Error('Variables de entorno de Google Sheets no configuradas');
+    }
+
+    // Configuración de autenticación JWT
+    const serviceAccountAuth = new JWT({
+      email: process.env.GOOGLE_CLIENT_EMAIL,
+      key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+      scopes: SCOPES,
+    });
+
+    // Conectar al documento
+    const doc = new GoogleSpreadsheet(
+      process.env.GOOGLE_SPREADSHEET_ID,
+      serviceAccountAuth
+    );
+
+    await doc.loadInfo();
+    return doc;
+  } catch (error) {
+    console.error('Error al conectar con Google Sheets:', error);
+    throw error;
+  }
+}
+
+/**
+ * Inicializa la hoja de cálculo con encabezados si no existen
+ * @param {Object} sheet - Hoja de Google Sheets
+ */
+async function initializeRecordsSheet(sheet) {
+  await sheet.loadHeaderRow();
+  
+  const requiredHeaders = [
+    'ID',
+    'REFERENCIA',
+    'SERIAL',
+    'ESTADO',
+    'CLIENTE',
+    'USUARIO_DESPACHO',
+    'USUARIO_PLANTA',
+    'USUARIO_INSTALACION',
+    'USUARIO_DESINSTALACION',
+    'PLACA',
+    'KILOMETRAJE_INSTALACION',
+    'KILOMETRAJE_DESINSTALACION',
+    'FECHA_ALMACEN',
+    'FECHA_DESPACHO',
+    'FECHA_INSTALACION',
+    'FECHA_DESINSTALACION',
+    'HORA_ALMACEN',
+    'HORA_DESPACHO',
+    'HORA_INSTALACION',
+    'HORA_DESINSTALACION',
+    'NOMBRE_INSTALADOR'
+  ];
+  
+  // Si no hay encabezados, crearlos
+  if (!sheet.headerValues || sheet.headerValues.length === 0) {
+    await sheet.setHeaderRow(requiredHeaders);
+  } else {
+    // Verificar si falta alguna columna requerida y agregarla
+    const missingHeaders = requiredHeaders.filter(header => !sheet.headerValues.includes(header));
+    
+    if (missingHeaders.length > 0) {
+      console.log(`⚠️ Agregando columnas faltantes a hoja ${sheet.title}:`, missingHeaders);
+      const newHeaders = [...sheet.headerValues, ...missingHeaders];
+      await sheet.setHeaderRow(newHeaders);
+      await sheet.loadHeaderRow(); // Recargar headers
+    }
+  }
+}
+
+/**
+ * Inicializa la hoja de usuarios con encabezados si no existen
+ * @param {Object} sheet - Hoja de Google Sheets
+ */
+async function initializeUsersSheet(sheet) {
+  await sheet.loadHeaderRow();
+
+  if (!sheet.headerValues || sheet.headerValues.length === 0) {
+    await sheet.setHeaderRow([
+      'USUARIO',
+      'TIPO',
+      'CONTRASEÑA',
+      'CLIENTE'
+    ]);
+  }
+}
+
+/**
+ * Obtiene o crea la hoja de registros
+ * @param {GoogleSpreadsheet} doc
+ */
+async function getOrCreateRecordsSheet(doc) {
+  let sheet = doc.sheetsByTitle[RECORDS_SHEET_TITLE];
+
+  if (!sheet) {
+    sheet = await doc.addSheet({
+      title: RECORDS_SHEET_TITLE,
+      headerValues: [
+        'ID',
+        'REFERENCIA',
+        'SERIAL',
+        'ESTADO',
+        'CLIENTE',
+        'USUARIO_DESPACHO',
+        'USUARIO_PLANTA',
+        'USUARIO_INSTALACION',
+        'USUARIO_DESINSTALACION',
+        'FECHA_ALMACEN',
+        'FECHA_DESPACHO',
+        'FECHA_INSTALACION',
+        'FECHA_DESINSTALACION',
+        'HORA_ALMACEN',
+        'HORA_DESPACHO',
+        'HORA_INSTALACION',
+        'HORA_DESINSTALACION',
+        'NOMBRE_INSTALADOR'
+      ]
+    });
+  }
+
+  await initializeRecordsSheet(sheet);
+  return sheet;
+}
+
+/**
+ * Obtiene o crea la hoja de clientes
+ * @param {GoogleSpreadsheet} doc
+ */
+async function getOrCreateClientsSheet(doc) {
+  const CLIENTS_SHEET_TITLE = 'CLIENTES';
+  let sheet = doc.sheetsByTitle[CLIENTS_SHEET_TITLE];
+
+  if (!sheet) {
+    sheet = await doc.addSheet({
+      title: CLIENTS_SHEET_TITLE,
+      headerValues: [
+        'NOMBRE',
+        'FECHA_REGISTRO'
+      ]
+    });
+    console.log('✅ Creada hoja CLIENTES');
+  }
+
+  await sheet.loadHeaderRow();
+  return sheet;
+}
+
+/**
+ * Obtiene o crea la hoja de usuarios
+ * @param {GoogleSpreadsheet} doc
+ */
+async function getOrCreateUsersSheet(doc) {
+  let sheet = doc.sheetsByTitle[USERS_SHEET_TITLE];
+
+  if (!sheet) {
+    sheet = await doc.addSheet({
+      title: USERS_SHEET_TITLE,
+      headerValues: [
+        'USUARIO',
+        'TIPO',
+        'CONTRASEÑA',
+        'CLIENTE'
+      ]
+    });
+  }
+
+  await initializeUsersSheet(sheet);
+  return sheet;
+}
+
+function normalizeUser(user) {
+  return (user || '').trim().toLowerCase();
+}
+
+function normalizeType(type) {
+  return (type || '').trim().toLowerCase();
+}
+
+function normalizeClient(client) {
+  return (client || '').trim().toUpperCase();
+}
+
+function isSuperadminUser(usuario) {
+  const normalizedUser = normalizeUser(usuario);
+  return normalizedUser === normalizeUser(SUPERADMIN_1_EMAIL) ||
+         normalizedUser === normalizeUser(SUPERADMIN_2_EMAIL);
+}
+
+function isSuperadminRow(row) {
+  return normalizeType(row.get('TIPO')) === 'super';
+}
+
+function isUserInRecord(row, userEmail) {
+  const normalizedUser = normalizeUser(userEmail);
+  if (!normalizedUser) {
+    return false;
+  }
+
+  return [
+    row.get('USUARIO_DESPACHO'),
+    row.get('USUARIO_PLANTA'),
+    row.get('USUARIO_INSTALACION'),
+    row.get('USUARIO_DESINSTALACION')
+  ].some(value => normalizeUser(value) === normalizedUser);
+}
+
+/**
+ * Valida credenciales de administrador o superadmin y retorna el row con información
+ * @param {GoogleSpreadsheet} doc
+ * @param {string} usuario
+ * @param {string} password
+ * @returns {Promise<{row: Object, tipo: string, cliente: string} | null>}
+ */
+async function validateAdminOrSuperadminCredentials(doc, usuario, password) {
+  const globalSheet = await getOrCreateUsersSheet(doc);
+  const normalizedUser = normalizeUser(usuario);
+  
+  // Buscar primero en hoja global
+  let userRow = await validateUserCredentials(globalSheet, normalizedUser, password);
+  
+  if (!userRow) {
+    // Buscar en hojas de clientes
+    await doc.loadInfo();
+    for (const sheet of doc.sheetsByIndex) {
+      if (sheet.title.endsWith('_USUARIOS')) {
+        userRow = await validateUserCredentials(sheet, normalizedUser, password);
+        if (userRow) {
+          break;
+        }
+      }
+    }
+  }
+  
+  if (!userRow) {
+    return null;
+  }
+  
+  const tipo = normalizeType(userRow.get('TIPO'));
+  const cliente = userRow.get('CLIENTE') || '';
+  
+  // Verificar que sea superadmin o administrador
+  if (tipo !== 'super' && tipo !== 'administrador') {
+    return null;
+  }
+  
+  return { row: userRow, tipo, cliente };
+}
+
+/**
+ * Valida credenciales de superadmin buscando en todas las hojas
+ * @param {GoogleSpreadsheet} doc
+ * @param {string} usuario
+ * @param {string} password
+ * @returns {Object|null} Fila del usuario si es válido y superadmin, null en caso contrario
+ */
+async function validateSuperadminCredentials(doc, usuario, password) {
+  const globalSheet = await getOrCreateUsersSheet(doc);
+  const normalizedUser = normalizeUser(usuario);
+  
+  // Buscar primero en hoja global
+  let userRow = await validateUserCredentials(globalSheet, normalizedUser, password);
+  
+  if (!userRow) {
+    // Buscar en hojas de clientes
+    await doc.loadInfo();
+    for (const sheet of doc.sheetsByIndex) {
+      if (sheet.title.endsWith('_USUARIOS')) {
+        userRow = await validateUserCredentials(sheet, normalizedUser, password);
+        if (userRow) {
+          break;
+        }
+      }
+    }
+  }
+  
+  // Verificar que sea superadmin
+  if (!userRow || !isSuperadminRow(userRow)) {
+    return null;
+  }
+  
+  return userRow;
+}
+
+/**
+ * Obtiene o crea la hoja de usuarios de un cliente específico
+ * @param {GoogleSpreadsheet} doc
+ * @param {string} cliente - Nombre del cliente
+ */
+async function getOrCreateClientUsersSheet(doc, cliente) {
+  const normalizedClient = normalizeClient(cliente);
+  const sheetTitle = `${normalizedClient}_USUARIOS`;
+  
+  let sheet = doc.sheetsByTitle[sheetTitle];
+
+  if (!sheet) {
+    sheet = await doc.addSheet({
+      title: sheetTitle,
+      headerValues: [
+        'USUARIO',
+        'TIPO',
+        'CONTRASEÑA',
+        'CLIENTE'
+      ]
+    });
+    console.log(`✅ Creada hoja de usuarios para cliente: ${sheetTitle}`);
+  }
+
+  await sheet.loadHeaderRow();
+  return sheet;
+}
+
+/**
+ * Obtiene o crea la hoja de registros de un cliente específico
+ * @param {GoogleSpreadsheet} doc
+ * @param {string} cliente - Nombre del cliente
+ */
+async function getOrCreateClientRecordsSheet(doc, cliente) {
+  const normalizedClient = normalizeClient(cliente);
+  const sheetTitle = `${normalizedClient}_REGISTROS`;
+  
+  let sheet = doc.sheetsByTitle[sheetTitle];
+
+  if (!sheet) {
+    sheet = await doc.addSheet({
+      title: sheetTitle,
+      headerValues: [
+        'ID',
+        'REFERENCIA',
+        'SERIAL',
+        'ESTADO',
+        'CLIENTE',
+        'USUARIO_DESPACHO',
+        'USUARIO_PLANTA',
+        'USUARIO_INSTALACION',
+        'USUARIO_DESINSTALACION',
+        'FECHA_ALMACEN',
+        'FECHA_DESPACHO',
+        'FECHA_INSTALACION',
+        'FECHA_DESINSTALACION',
+        'HORA_ALMACEN',
+        'HORA_DESPACHO',
+        'HORA_INSTALACION',
+        'HORA_DESINSTALACION',
+        'NOMBRE_INSTALADOR'
+      ]
+    });
+    console.log(`✅ Creada hoja de registros para cliente: ${sheetTitle}`);
+  }
+
+  await sheet.loadHeaderRow();
+  return sheet;
+}
+
+/**
+ * Obtiene el cliente de un usuario desde cualquier hoja de clientes
+ * @param {GoogleSpreadsheet} doc
+ * @param {string} usuario
+ */
+async function getUserClient(doc, usuario) {
+  const normalizedUser = normalizeUser(usuario);
+  
+  // Primero buscar en la hoja global USUARIOS (para superadmins)
+  const globalSheet = await getOrCreateUsersSheet(doc);
+  const globalRows = await globalSheet.getRows();
+  const globalUser = globalRows.find(row => normalizeUser(row.get('USUARIO')) === normalizedUser);
+  
+  if (globalUser) {
+    return globalUser.get('CLIENTE') || '';
+  }
+  
+  // Buscar en todas las hojas de clientes
+  await doc.loadInfo();
+  for (const sheet of doc.sheetsByIndex) {
+    if (sheet.title.endsWith('_USUARIOS')) {
+      const rows = await sheet.getRows();
+      const userRow = rows.find(row => normalizeUser(row.get('USUARIO')) === normalizedUser);
+      if (userRow) {
+        return userRow.get('CLIENTE') || '';
+      }
+    }
+  }
+  
+  return '';
+}
+
+async function validateUserCredentials(sheet, usuario, password) {
+  const rows = await sheet.getRows();
+  const normalizedUser = normalizeUser(usuario);
+  const userRow = rows.find(row => normalizeUser(row.get('USUARIO')) === normalizedUser);
+
+  if (!userRow) {
+    return null;
+  }
+
+  const storedPassword = (userRow.get('CONTRASEÑA') || '').toString().trim();
+  if (storedPassword !== password) {
+    return null;
+  }
+
+  return userRow;
+}
+
+/**
+ * Busca un registro existente por REFERENCIA y SERIAL
+ * @param {Object} sheet - Hoja de Google Sheets
+ * @param {string} referencia - Referencia del producto
+ * @param {string} serial - Serial del producto
+ * @returns {Object|null} Fila encontrada o null
+ */
+async function findExistingRecord(sheet, referencia, serial) {
+  const rows = await sheet.getRows();
+  return rows.find(row => 
+    row.get('REFERENCIA') === referencia && 
+    row.get('SERIAL') === serial
+  );
+}
+
+/**
+ * Parsea el contenido del QR para extraer REFERENCIA y SERIAL
+ * @param {string} qrContent - Contenido del QR en formato REFERENCIA|SERIAL
+ * @returns {Object} Objeto con referencia y serial, o null si es inválido
+ */
+function parseQRContent(qrContent) {
+  // Formato esperado: REFERENCIA|SERIAL (ej: OG971390|202630010002)
+  const parts = qrContent.split('|');
+  
+  if (parts.length === 2 && parts[0].trim() && parts[1].trim()) {
+    return {
+      referencia: parts[0].trim(),
+      serial: parts[1].trim()
+    };
+  }
+  
+  return null;
+}
+
+// ============================================
+// RUTAS DE LA API
+// ============================================
+
+/**
+ * Ruta de prueba - Verifica que el servidor está funcionando
+ */
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    status: 'OK', 
+    message: 'Servidor funcionando correctamente',
+    timestamp: new Date().toISOString()
+  });
+});
+
+/**
+ * Obtiene lista de clientes
+ * GET /api/clients
+ */
+app.get('/api/clients', async (req, res) => {
+  try {
+    const doc = await getGoogleSheet();
+    const sheet = await getOrCreateClientsSheet(doc);
+    const rows = await sheet.getRows();
+
+    const clients = rows.map(row => ({
+      nombre: row.get('NOMBRE') || ''
+    })).filter(c => c.nombre.trim() !== '');
+
+    res.json({ 
+      success: true, 
+      data: clients
+    });
+  } catch (error) {
+    console.error('Error al obtener clientes:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Error al obtener clientes',
+      details: error.message 
+    });
+  }
+});
+
+/**
+ * Registra un nuevo cliente
+ * POST /api/clients
+ * Body: { nombre, authUser, authPassword }
+ */
+app.post('/api/clients', async (req, res) => {
+  try {
+    const { nombre, authUser, authPassword } = req.body;
+
+    if (!nombre || !nombre.trim()) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'El nombre del cliente es requerido' 
+      });
+    }
+
+    // Validar que sea superadmin
+    const doc = await getGoogleSheet();
+    const authData = await validateAdminOrSuperadminCredentials(doc, authUser, authPassword);
+    
+    if (!authData || authData.tipo !== 'super') {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Solo superadmin puede agregar clientes' 
+      });
+    }
+
+    // Obtener hoja de clientes
+    const sheet = await getOrCreateClientsSheet(doc);
+    const rows = await sheet.getRows();
+
+    // Verificar que no exista ya
+    const normalizedNombre = nombre.trim().toUpperCase();
+    const exists = rows.some(row => 
+      (row.get('NOMBRE') || '').trim().toUpperCase() === normalizedNombre
+    );
+
+    if (exists) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Este cliente ya existe' 
+      });
+    }
+
+    // Agregar nuevo cliente
+    const now = new Date().toLocaleDateString('es-ES');
+    await sheet.addRow({
+      'NOMBRE': nombre.trim(),
+      'FECHA_REGISTRO': now
+    });
+
+    // Crear automáticamente las hojas de usuarios y registros para este cliente
+    await doc.loadInfo();
+    const clienteNormalizado = nombre.trim().toUpperCase();
+    
+    // Crear hoja de usuarios del cliente
+    const usersSheetName = `${clienteNormalizado}_USUARIOS`;
+    let usersSheet = doc.sheetsByTitle[usersSheetName];
+    if (!usersSheet) {
+      usersSheet = await doc.addSheet({
+        title: usersSheetName,
+        headerValues: [
+          'USUARIO',
+          'TIPO',
+          'CONTRASEÑA',
+          'CLIENTE'
+        ]
+      });
+      console.log(`✅ Creada hoja de usuarios: ${usersSheetName}`);
+    }
+    
+    // Crear hoja de registros del cliente
+    const recordsSheetName = `${clienteNormalizado}_REGISTROS`;
+    let recordsSheet = doc.sheetsByTitle[recordsSheetName];
+    if (!recordsSheet) {
+      recordsSheet = await doc.addSheet({
+        title: recordsSheetName,
+        headerValues: [
+          'ID',
+          'REFERENCIA',
+          'SERIAL',
+          'ESTADO',
+          'CLIENTE',
+          'USUARIO_PLANTA',
+          'USUARIO_INSTALACION',
+          'USUARIO_DESINSTALACION',
+          'PLACA',
+          'KILOMETRAJE_INSTALACION',
+          'KILOMETRAJE_DESINSTALACION',
+          'FECHA_ALMACEN',
+          'FECHA_DESPACHO',
+          'FECHA_INSTALACION',
+          'FECHA_DESINSTALACION',
+          'HORA_ALMACEN',
+          'HORA_DESPACHO',
+          'HORA_INSTALACION',
+          'HORA_DESINSTALACION'
+        ]
+      });
+      console.log(`✅ Creada hoja de registros: ${recordsSheetName}`);
+    }
+
+    res.json({ 
+      success: true, 
+      message: '✅ Cliente y hojas creadas correctamente',
+      data: {
+        nombre: nombre.trim(),
+        fechaRegistro: now,
+        hojasCreadas: [usersSheetName, recordsSheetName]
+      }
+    });
+  } catch (error) {
+    console.error('Error al registrar cliente:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Error al registrar cliente',
+      details: error.message 
+    });
+  }
+});
+
+/**
+ * Actualiza un cliente existente
+ * PUT /api/clients
+ * Body: { nombreActual, nuevoNombre, authUser, authPassword }
+ */
+app.put('/api/clients', async (req, res) => {
+  try {
+    const { nombreActual, nuevoNombre, authUser, authPassword } = req.body;
+
+    if (!nombreActual || !nombreActual.trim()) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'El nombre actual del cliente es requerido' 
+      });
+    }
+
+    if (!nuevoNombre || !nuevoNombre.trim()) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'El nuevo nombre del cliente es requerido' 
+      });
+    }
+
+    // Validar que sea superadmin
+    const doc = await getGoogleSheet();
+    const authData = await validateAdminOrSuperadminCredentials(doc, authUser, authPassword);
+    
+    if (!authData || authData.tipo !== 'super') {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Solo superadmin puede editar clientes' 
+      });
+    }
+
+    // Obtener hoja de clientes
+    const sheet = await getOrCreateClientsSheet(doc);
+    const rows = await sheet.getRows();
+
+    // Buscar el cliente a editar
+    const normalizedActual = nombreActual.trim().toUpperCase();
+    const clienteRow = rows.find(row => 
+      (row.get('NOMBRE') || '').trim().toUpperCase() === normalizedActual
+    );
+
+    if (!clienteRow) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Cliente no encontrado' 
+      });
+    }
+
+    // Verificar que el nuevo nombre no exista ya (si es diferente)
+    const normalizedNuevo = nuevoNombre.trim().toUpperCase();
+    if (normalizedActual !== normalizedNuevo) {
+      const exists = rows.some(row => 
+        (row.get('NOMBRE') || '').trim().toUpperCase() === normalizedNuevo
+      );
+
+      if (exists) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Ya existe un cliente con ese nombre' 
+        });
+      }
+    }
+
+    // Actualizar el cliente
+    clienteRow.set('NOMBRE', nuevoNombre.trim());
+    await clienteRow.save();
+
+    // También actualizar el nombre del cliente en:
+    // 1. Hoja de registros globales
+    // 2. Hoja de usuarios del cliente
+    // 3. Renombrar la hoja del cliente (si existe)
+    
+    await doc.loadInfo();
+    
+    // Actualizar registros globales
+    const registrosSheet = await getOrCreateRecordsSheet(doc);
+    const registrosRows = await registrosSheet.getRows();
+    for (const row of registrosRows) {
+      if ((row.get('CLIENTE') || '').trim().toUpperCase() === normalizedActual) {
+        row.set('CLIENTE', nuevoNombre.trim());
+        await row.save();
+      }
+    }
+
+    // Actualizar usuarios del cliente
+    const oldClientUsersSheetName = `${normalizedActual}_USUARIOS`;
+    const oldClientRecordsSheetName = `${normalizedActual}_REGISTROS`;
+    const newClientUsersSheetName = `${normalizedNuevo}_USUARIOS`;
+    const newClientRecordsSheetName = `${normalizedNuevo}_REGISTROS`;
+
+    // Renombrar hoja de usuarios si existe
+    const oldUsersSheet = doc.sheetsByTitle[oldClientUsersSheetName];
+    if (oldUsersSheet) {
+      await oldUsersSheet.updateProperties({ title: newClientUsersSheetName });
+      // Actualizar campo CLIENTE en cada usuario
+      const usersRows = await oldUsersSheet.getRows();
+      for (const row of usersRows) {
+        row.set('CLIENTE', nuevoNombre.trim());
+        await row.save();
+      }
+    }
+
+    // Renombrar hoja de registros del cliente si existe
+    const oldRecordsSheet = doc.sheetsByTitle[oldClientRecordsSheetName];
+    if (oldRecordsSheet) {
+      await oldRecordsSheet.updateProperties({ title: newClientRecordsSheetName });
+      // Actualizar campo CLIENTE en cada registro
+      const recordsRows = await oldRecordsSheet.getRows();
+      for (const row of recordsRows) {
+        row.set('CLIENTE', nuevoNombre.trim());
+        await row.save();
+      }
+    }
+
+    res.json({ 
+      success: true, 
+      message: '✅ Cliente actualizado correctamente',
+      data: {
+        nombreAnterior: nombreActual.trim(),
+        nombreNuevo: nuevoNombre.trim()
+      }
+    });
+  } catch (error) {
+    console.error('Error al actualizar cliente:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Error al actualizar cliente',
+      details: error.message 
+    });
+  }
+});
+
+/**
+ * Elimina un cliente
+ * DELETE /api/clients
+ * Body: { nombre, authUser, authPassword }
+ */
+app.delete('/api/clients', async (req, res) => {
+  try {
+    const { nombre, authUser, authPassword } = req.body;
+
+    if (!nombre || !nombre.trim()) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'El nombre del cliente es requerido' 
+      });
+    }
+
+    // Validar que sea superadmin
+    const doc = await getGoogleSheet();
+    const authData = await validateAdminOrSuperadminCredentials(doc, authUser, authPassword);
+    
+    if (!authData || authData.tipo !== 'super') {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Solo superadmin puede eliminar clientes' 
+      });
+    }
+
+    // Obtener hoja de clientes
+    const sheet = await getOrCreateClientsSheet(doc);
+    const rows = await sheet.getRows();
+
+    // Buscar el cliente a eliminar
+    const normalizedNombre = nombre.trim().toUpperCase();
+    const clienteRow = rows.find(row => 
+      (row.get('NOMBRE') || '').trim().toUpperCase() === normalizedNombre
+    );
+
+    if (!clienteRow) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Cliente no encontrado' 
+      });
+    }
+
+    // Verificar si el cliente tiene registros asociados
+    const registrosSheet = await getOrCreateRecordsSheet(doc);
+    const registrosRows = await registrosSheet.getRows();
+    const tieneRegistros = registrosRows.some(row => 
+      (row.get('CLIENTE') || '').trim().toUpperCase() === normalizedNombre
+    );
+
+    if (tieneRegistros) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'No se puede eliminar el cliente porque tiene registros asociados. Primero elimina o reasigna los registros.' 
+      });
+    }
+
+    // Eliminar el cliente de la hoja CLIENTES
+    await clienteRow.delete();
+
+    // Opcional: eliminar las hojas del cliente si existen
+    await doc.loadInfo();
+    const clientUsersSheetName = `${normalizedNombre}_USUARIOS`;
+    const clientRecordsSheetName = `${normalizedNombre}_REGISTROS`;
+
+    const usersSheet = doc.sheetsByTitle[clientUsersSheetName];
+    if (usersSheet) {
+      await usersSheet.delete();
+    }
+
+    const recordsSheet = doc.sheetsByTitle[clientRecordsSheetName];
+    if (recordsSheet) {
+      await recordsSheet.delete();
+    }
+
+    res.json({ 
+      success: true, 
+      message: '✅ Cliente eliminado correctamente',
+      data: {
+        nombre: nombre.trim()
+      }
+    });
+  } catch (error) {
+    console.error('Error al eliminar cliente:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Error al eliminar cliente',
+      details: error.message 
+    });
+  }
+});
+
+/**
+ * Guarda un código QR escaneado en Google Sheets
+ * POST /api/save-qr
+ * Body: { qrContent }
+ */
+app.post('/api/save-qr', async (req, res) => {
+  try {
+    const { qrContent, userEmail, userClient, userTipo } = req.body;
+
+    // Validación de datos
+    if (!qrContent) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'El contenido del QR es requerido' 
+      });
+    }
+
+    // El cliente solo es requerido para segundo escaneo en adelante (cuando es usuario despacho)
+    // En el primer escaneo, el cliente puede estar vacío
+
+    // Parsear el contenido del QR
+    const parsedData = parseQRContent(qrContent);
+    if (!parsedData) {
+      console.log('❌ QR con formato inválido:', qrContent);
+      return res.status(400).json({ 
+        success: false, 
+        error: `Formato de QR inválido. Esperado: REFERENCIA|SERIAL. Recibido: "${qrContent.substring(0, 50)}${qrContent.length > 50 ? '...' : ''}"`,
+        qrContent: qrContent
+      });
+    }
+
+    const { referencia, serial } = parsedData;
+
+    // Conectar a Google Sheets y obtener la hoja REGISTROS global (fuente única de verdad)
+    const doc = await getGoogleSheet();
+    const globalSheet = await getOrCreateRecordsSheet(doc);
+    
+    // Asegurar que los headers estén cargados correctamente
+    await globalSheet.loadHeaderRow();
+    console.log('✅ Headers cargados en globalSheet:', globalSheet.headerValues);
+
+    const existingGlobalRecord = await findExistingRecord(globalSheet, referencia, serial);
+    const now = new Date();
+    const fecha = now.toLocaleDateString('es-ES');
+    const hora = now.toLocaleTimeString('es-ES');
+
+    if (existingGlobalRecord) {
+      // Registro existente: determinar siguiente estado
+      // La trazabilidad es por serial, independiente del usuario que escanee
+      const currentState = existingGlobalRecord.get('ESTADO');
+      const recordClient = existingGlobalRecord.get('CLIENTE'); // Cliente original del registro
+      
+      // Obtener la hoja del cliente actual (quien escanea) solo si tiene cliente asignado
+      let currentClientSheet = null;
+      let existingCurrentClientRecord = null;
+      if (userClient && userClient.trim() !== '') {
+        currentClientSheet = await getOrCreateClientRecordsSheet(doc, userClient);
+        await currentClientSheet.loadHeaderRow(); // Asegurar headers cargados
+        existingCurrentClientRecord = await findExistingRecord(currentClientSheet, referencia, serial);
+      }
+      
+      // Obtener la hoja del cliente original (si es diferente)
+      let originalClientSheet = null;
+      let existingOriginalClientRecord = null;
+      if (recordClient && recordClient !== userClient) {
+        originalClientSheet = await getOrCreateClientRecordsSheet(doc, recordClient);
+        await originalClientSheet.loadHeaderRow(); // Asegurar headers cargados
+        existingOriginalClientRecord = await findExistingRecord(originalClientSheet, referencia, serial);
+      }
+      
+      if (currentState === 'EN ALMACEN') {
+        // SEGUNDO ESCANEO: Actualizar a DESPACHADO
+        // Validar que usuario despacho tenga cliente seleccionado
+        if (userTipo === 'despacho' && (!userClient || userClient.trim() === '')) {
+          return res.status(400).json({ 
+            success: false, 
+            error: 'Debes seleccionar un cliente para despachar este producto' 
+          });
+        }
+        
+        // Aquí el usuario despacho agrega el cliente
+        existingGlobalRecord.set('ESTADO', 'DESPACHADO');
+        existingGlobalRecord.set('CLIENTE', userClient); // Agregar cliente en segundo escaneo
+        existingGlobalRecord.set('USUARIO_DESPACHO', userEmail || '');
+        existingGlobalRecord.set('FECHA_DESPACHO', fecha);
+        existingGlobalRecord.set('HORA_DESPACHO', hora);
+        await existingGlobalRecord.save();
+
+        // Registrar cliente en CLIENTES si no existe (solo para usuarios despacho)
+        if (userTipo === 'despacho') {
+          const clientsSheet = await getOrCreateClientsSheet(doc);
+          const clientsRows = await clientsSheet.getRows();
+          const normalizedClientName = userClient.trim().toUpperCase();
+          const clientExists = clientsRows.some(row => 
+            (row.get('NOMBRE') || '').trim().toUpperCase() === normalizedClientName
+          );
+          
+          if (!clientExists) {
+            await clientsSheet.addRow({
+              'NOMBRE': userClient.trim(),
+              'FECHA_REGISTRO': fecha
+            });
+          }
+        }
+
+        // Crear registro en la hoja del cliente
+        const currentClientRows = await currentClientSheet.getRows();
+        await currentClientSheet.addRow({
+          'ID': currentClientRows.length + 1,
+          'REFERENCIA': referencia,
+          'SERIAL': serial,
+          'ESTADO': 'DESPACHADO',
+          'CLIENTE': userClient,
+          'USUARIO_DESPACHO': userEmail || '',
+          'USUARIO_PLANTA': existingGlobalRecord.get('USUARIO_PLANTA'),
+          'USUARIO_INSTALACION': '',
+          'USUARIO_DESINSTALACION': '',
+          'PLACA': '',
+          'KILOMETRAJE_INSTALACION': '',
+          'KILOMETRAJE_DESINSTALACION': '',
+          'NOMBRE_INSTALADOR': '',
+          'FECHA_ALMACEN': existingGlobalRecord.get('FECHA_ALMACEN'),
+          'FECHA_DESPACHO': fecha,
+          'FECHA_INSTALACION': '',
+          'FECHA_DESINSTALACION': '',
+          'HORA_ALMACEN': existingGlobalRecord.get('HORA_ALMACEN'),
+          'HORA_DESPACHO': hora,
+          'HORA_INSTALACION': '',
+          'HORA_DESINSTALACION': ''
+        });
+
+        return res.json({ 
+          success: true, 
+          action: 'dispatched',
+          message: '🚚 Producto marcado como DESPACHADO',
+          data: {
+            id: existingGlobalRecord.get('ID'),
+            referencia,
+            serial,
+            estado: 'DESPACHADO',
+            cliente: userClient, // Cliente agregado en segundo escaneo
+            fechaAlmacen: existingGlobalRecord.get('FECHA_ALMACEN'),
+            fechaDespacho: fecha
+          }
+        });
+      } else if (currentState === 'DESPACHADO') {
+        // TERCER ESCANEO: Actualizar a INSTALADO
+        // Extraer datos adicionales del body con validación
+        const placa = (req.body.placa || '').trim();
+        const kilometrajeInstalacion = (req.body.kilometrajeInstalacion || '').trim();
+        const installerName = (req.body.installerName || '').trim();
+        
+        // Verificar si se enviaron los datos de instalación
+        if (!placa || !kilometrajeInstalacion) {
+          // Pedir al frontend que solicite los datos de instalación
+          return res.json({ 
+            success: true, 
+            action: 'needs_installation_data',
+            message: 'Se requieren datos de instalación',
+            data: {
+              id: existingGlobalRecord.get('ID'),
+              referencia,
+              serial,
+              estado: currentState,
+              cliente: recordClient
+            }
+          });
+        }
+        
+        // Log para debugging
+        console.log(`📝 [INSTALACION] Guardando instalación - Placa: ${placa}, KM: ${kilometrajeInstalacion}, Instalador: "${installerName}" (length: ${installerName.length})`);
+        
+        existingGlobalRecord.set('ESTADO', 'INSTALADO');
+        existingGlobalRecord.set('USUARIO_INSTALACION', userEmail || '');
+        existingGlobalRecord.set('PLACA', placa);
+        existingGlobalRecord.set('KILOMETRAJE_INSTALACION', kilometrajeInstalacion);
+        existingGlobalRecord.set('NOMBRE_INSTALADOR', installerName);
+        existingGlobalRecord.set('FECHA_INSTALACION', fecha);
+        existingGlobalRecord.set('HORA_INSTALACION', hora);
+        await existingGlobalRecord.save();
+
+        // Actualizar o crear en la hoja del cliente actual
+        if (existingCurrentClientRecord) {
+          existingCurrentClientRecord.set('ESTADO', 'INSTALADO');
+          existingCurrentClientRecord.set('USUARIO_INSTALACION', userEmail || '');
+          existingCurrentClientRecord.set('PLACA', placa);
+          existingCurrentClientRecord.set('KILOMETRAJE_INSTALACION', kilometrajeInstalacion);
+          existingCurrentClientRecord.set('NOMBRE_INSTALADOR', installerName);
+          existingCurrentClientRecord.set('FECHA_INSTALACION', fecha);
+          existingCurrentClientRecord.set('HORA_INSTALACION', hora);
+          await existingCurrentClientRecord.save();
+        } else if (currentClientSheet) {
+          // Crear nuevo registro en la hoja del cliente actual con todos los datos
+          const currentClientRows = await currentClientSheet.getRows();
+          await currentClientSheet.addRow({
+            'ID': currentClientRows.length + 1,
+            'REFERENCIA': referencia,
+            'SERIAL': serial,
+            'ESTADO': 'INSTALADO',
+            'CLIENTE': recordClient,
+            'USUARIO_DESPACHO': existingGlobalRecord.get('USUARIO_DESPACHO'),
+            'USUARIO_PLANTA': existingGlobalRecord.get('USUARIO_PLANTA'),
+            'USUARIO_INSTALACION': userEmail || '',
+            'USUARIO_DESINSTALACION': '',
+            'PLACA': placa,
+            'KILOMETRAJE_INSTALACION': kilometrajeInstalacion,
+            'NOMBRE_INSTALADOR': installerName,
+            'FECHA_ALMACEN': existingGlobalRecord.get('FECHA_ALMACEN'),
+            'FECHA_DESPACHO': existingGlobalRecord.get('FECHA_DESPACHO'),
+            'FECHA_INSTALACION': fecha,
+            'FECHA_DESINSTALACION': '',
+            'HORA_ALMACEN': existingGlobalRecord.get('HORA_ALMACEN'),
+            'HORA_DESPACHO': existingGlobalRecord.get('HORA_DESPACHO'),
+            'HORA_INSTALACION': hora,
+            'HORA_DESINSTALACION': ''
+          });
+        }
+
+        // Actualizar también en hoja del cliente original (si es diferente)
+        if (existingOriginalClientRecord) {
+          existingOriginalClientRecord.set('ESTADO', 'INSTALADO');
+          existingOriginalClientRecord.set('USUARIO_INSTALACION', userEmail || '');
+          existingOriginalClientRecord.set('PLACA', placa);
+          existingOriginalClientRecord.set('KILOMETRAJE_INSTALACION', kilometrajeInstalacion);
+          existingOriginalClientRecord.set('NOMBRE_INSTALADOR', installerName);
+          existingOriginalClientRecord.set('FECHA_INSTALACION', fecha);
+          existingOriginalClientRecord.set('HORA_INSTALACION', hora);
+          await existingOriginalClientRecord.save();
+        }
+
+        return res.json({ 
+          success: true, 
+          action: 'installed',
+          message: '🔧 Producto marcado como INSTALADO',
+          data: {
+            id: existingGlobalRecord.get('ID'),
+            referencia,
+            serial,
+            estado: 'INSTALADO',
+            cliente: recordClient,
+            fechaAlmacen: existingGlobalRecord.get('FECHA_ALMACEN'),
+            fechaDespacho: existingGlobalRecord.get('FECHA_DESPACHO'),
+            fechaInstalacion: fecha,
+            usuarioInstalacion: userEmail
+          }
+        });
+      } else if (currentState === 'INSTALADO') {
+        // CUARTO ESCANEO: Actualizar a DESINSTALADO
+        // Extraer datos adicionales del body
+        const kilometrajeDesinstalacion = req.body.kilometrajeDesinstalacion || '';
+        
+        // Verificar si se enviaron los datos de desinstalación
+        if (!kilometrajeDesinstalacion) {
+          // Pedir al frontend que solicite los datos de desinstalación
+          return res.json({ 
+            success: true, 
+            action: 'needs_uninstallation_data',
+            message: 'Se requieren datos de desinstalación',
+            data: {
+              id: existingGlobalRecord.get('ID'),
+              referencia,
+              serial,
+              estado: currentState,
+              cliente: recordClient
+            }
+          });
+        }
+        
+        existingGlobalRecord.set('ESTADO', 'DESINSTALADO');
+        existingGlobalRecord.set('USUARIO_DESINSTALACION', userEmail || '');
+        existingGlobalRecord.set('KILOMETRAJE_DESINSTALACION', kilometrajeDesinstalacion);
+        existingGlobalRecord.set('FECHA_DESINSTALACION', fecha);
+        existingGlobalRecord.set('HORA_DESINSTALACION', hora);
+        await existingGlobalRecord.save();
+
+        // Actualizar o crear en la hoja del cliente actual
+        if (existingCurrentClientRecord) {
+          existingCurrentClientRecord.set('ESTADO', 'DESINSTALADO');
+          existingCurrentClientRecord.set('USUARIO_DESINSTALACION', userEmail || '');
+          existingCurrentClientRecord.set('KILOMETRAJE_DESINSTALACION', kilometrajeDesinstalacion);
+          existingCurrentClientRecord.set('FECHA_DESINSTALACION', fecha);
+          existingCurrentClientRecord.set('HORA_DESINSTALACION', hora);
+          await existingCurrentClientRecord.save();
+        } else if (currentClientSheet) {
+          // Crear nuevo registro en la hoja del cliente actual con todos los datos
+          const currentClientRows = await currentClientSheet.getRows();
+          await currentClientSheet.addRow({
+            'ID': currentClientRows.length + 1,
+            'REFERENCIA': referencia,
+            'SERIAL': serial,
+            'ESTADO': 'DESINSTALADO',
+            'CLIENTE': recordClient,
+            'USUARIO_DESPACHO': existingGlobalRecord.get('USUARIO_DESPACHO'),
+            'USUARIO_PLANTA': existingGlobalRecord.get('USUARIO_PLANTA'),
+            'USUARIO_INSTALACION': existingGlobalRecord.get('USUARIO_INSTALACION'),
+            'USUARIO_DESINSTALACION': userEmail || '',
+            'PLACA': existingGlobalRecord.get('PLACA'),
+            'KILOMETRAJE_INSTALACION': existingGlobalRecord.get('KILOMETRAJE_INSTALACION'),
+            'KILOMETRAJE_DESINSTALACION': kilometrajeDesinstalacion,
+            'FECHA_ALMACEN': existingGlobalRecord.get('FECHA_ALMACEN'),
+            'FECHA_DESPACHO': existingGlobalRecord.get('FECHA_DESPACHO'),
+            'FECHA_INSTALACION': existingGlobalRecord.get('FECHA_INSTALACION'),
+            'FECHA_DESINSTALACION': fecha,
+            'HORA_ALMACEN': existingGlobalRecord.get('HORA_ALMACEN'),
+            'HORA_DESPACHO': existingGlobalRecord.get('HORA_DESPACHO'),
+            'HORA_INSTALACION': existingGlobalRecord.get('HORA_INSTALACION'),
+            'HORA_DESINSTALACION': hora
+          });
+        }
+
+        // Actualizar también en hoja del cliente original (si es diferente)
+        if (existingOriginalClientRecord) {
+          existingOriginalClientRecord.set('ESTADO', 'DESINSTALADO');
+          existingOriginalClientRecord.set('USUARIO_DESINSTALACION', userEmail || '');
+          existingOriginalClientRecord.set('KILOMETRAJE_DESINSTALACION', kilometrajeDesinstalacion);
+          existingOriginalClientRecord.set('FECHA_DESINSTALACION', fecha);
+          existingOriginalClientRecord.set('HORA_DESINSTALACION', hora);
+          await existingOriginalClientRecord.save();
+        }
+
+        return res.json({ 
+          success: true, 
+          action: 'uninstalled',
+          message: '📤 Producto marcado como DESINSTALADO',
+          data: {
+            id: existingGlobalRecord.get('ID'),
+            referencia,
+            serial,
+            estado: 'DESINSTALADO',
+            cliente: recordClient,
+            fechaAlmacen: existingGlobalRecord.get('FECHA_ALMACEN'),
+            fechaDespacho: existingGlobalRecord.get('FECHA_DESPACHO'),
+            fechaInstalacion: existingGlobalRecord.get('FECHA_INSTALACION'),
+            fechaDesinstalacion: fecha,
+            usuarioDesinstalacion: userEmail
+          }
+        });
+      } else {
+        // Ya fue DESINSTALADO, mostrar información pero asegurar que existe en hoja del cliente actual
+        if (!existingCurrentClientRecord && currentClientSheet) {
+          // Crear el registro en la hoja del cliente actual para que pueda verlo
+          const currentClientRows = await currentClientSheet.getRows();
+          await currentClientSheet.addRow({
+            'ID': currentClientRows.length + 1,
+            'REFERENCIA': referencia,
+            'SERIAL': serial,
+            'ESTADO': 'DESINSTALADO',
+            'CLIENTE': recordClient,
+            'USUARIO_DESPACHO': existingGlobalRecord.get('USUARIO_DESPACHO'),
+            'USUARIO_PLANTA': existingGlobalRecord.get('USUARIO_PLANTA'),
+            'USUARIO_INSTALACION': existingGlobalRecord.get('USUARIO_INSTALACION'),
+            'USUARIO_DESINSTALACION': existingGlobalRecord.get('USUARIO_DESINSTALACION'),
+            'PLACA': existingGlobalRecord.get('PLACA'),
+            'KILOMETRAJE_INSTALACION': existingGlobalRecord.get('KILOMETRAJE_INSTALACION'),
+            'KILOMETRAJE_DESINSTALACION': existingGlobalRecord.get('KILOMETRAJE_DESINSTALACION'),
+            'FECHA_ALMACEN': existingGlobalRecord.get('FECHA_ALMACEN'),
+            'FECHA_DESPACHO': existingGlobalRecord.get('FECHA_DESPACHO'),
+            'FECHA_INSTALACION': existingGlobalRecord.get('FECHA_INSTALACION'),
+            'FECHA_DESINSTALACION': existingGlobalRecord.get('FECHA_DESINSTALACION'),
+            'HORA_ALMACEN': existingGlobalRecord.get('HORA_ALMACEN'),
+            'HORA_DESPACHO': existingGlobalRecord.get('HORA_DESPACHO'),
+            'HORA_INSTALACION': existingGlobalRecord.get('HORA_INSTALACION'),
+            'HORA_DESINSTALACION': existingGlobalRecord.get('HORA_DESINSTALACION')
+          });
+        }
+
+        return res.json({ 
+          success: true, 
+          action: 'already_completed',
+          message: '⚠️ Este producto ya completó todo el ciclo (DESINSTALADO)',
+          data: {
+            referencia,
+            serial,
+            estado: currentState,
+            cliente: recordClient,
+            fechaAlmacen: existingGlobalRecord.get('FECHA_ALMACEN'),
+            fechaDespacho: existingGlobalRecord.get('FECHA_DESPACHO'),
+            fechaInstalacion: existingGlobalRecord.get('FECHA_INSTALACION'),
+            fechaDesinstalacion: existingGlobalRecord.get('FECHA_DESINSTALACION')
+          }
+        });
+      }
+    } else {
+      // PRIMER ESCANEO: Crear nuevo registro EN ALMACEN
+      // En el primer escaneo NO se guarda el cliente
+      const globalRows = await globalSheet.getRows();
+      const nextGlobalId = globalRows.length + 1;
+
+      const newRecordData = {
+        'REFERENCIA': referencia,
+        'SERIAL': serial,
+        'ESTADO': 'EN ALMACEN',
+        'CLIENTE': '', // No se guarda cliente en el primer escaneo
+        'USUARIO_DESPACHO': '',
+        'USUARIO_PLANTA': userEmail || '',
+        'USUARIO_INSTALACION': '',
+        'USUARIO_DESINSTALACION': '',
+        'PLACA': '',
+        'KILOMETRAJE_INSTALACION': '',
+        'FECHA_ALMACEN': fecha,
+        'FECHA_DESPACHO': '',
+        'FECHA_INSTALACION': '',
+        'FECHA_DESINSTALACION': '',
+        'HORA_ALMACEN': hora,
+        'HORA_DESPACHO': '',
+        'HORA_INSTALACION': '',
+        'HORA_DESINSTALACION': ''
+      };
+
+      // Guardar solo en hoja global REGISTROS (fuente única de verdad)
+      await globalSheet.addRow({
+        'ID': nextGlobalId,
+        ...newRecordData
+      });
+
+      res.json({ 
+        success: true, 
+        action: 'stored',
+        message: '✅ Producto registrado EN ALMACEN',
+        data: {
+          id: nextGlobalId,
+          referencia,
+          serial,
+          estado: 'EN ALMACEN',
+          cliente: '', // No se guarda cliente en primer escaneo
+          fechaAlmacen: fecha
+        }
+      });
+    }
+
+  } catch (error) {
+    console.error('Error al guardar QR:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Error al guardar en Google Sheets',
+      details: error.message 
+    });
+  }
+});
+
+/**
+ * Obtiene los últimos registros de QR escaneados
+ * GET /api/recent-scans?limit=10&superadmin=true
+ */
+app.get('/api/recent-scans', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 10;
+    const cliente = req.query.cliente || '';
+    const isSuperadminRequest = req.query.superadmin === 'true';
+    const userEmail = req.query.userEmail || '';
+    
+    const doc = await getGoogleSheet();
+    let rows = [];
+
+    if (cliente) {
+      // Filtrar por cliente específico
+      const sheet = await getOrCreateClientRecordsSheet(doc, cliente);
+      rows = await sheet.getRows();
+    } else if (isSuperadminRequest) {
+      // Superadmin: obtener registros de la hoja global REGISTROS (no cargar todos los clientes)
+      // Esto evita exceder límites de API al no iterar por todas las hojas
+      const globalSheet = await getOrCreateRecordsSheet(doc);
+      rows = await globalSheet.getRows();
+    } else {
+      // Usuario regular: obtener registros globales
+      const sheet = await getOrCreateRecordsSheet(doc);
+      rows = await sheet.getRows();
+    }
+
+    if (userEmail && !isSuperadminRequest && !cliente) {
+      rows = rows.filter(row => isUserInRecord(row, userEmail));
+    }
+
+    const recentRows = rows.slice(-limit).reverse();
+
+    const data = recentRows.map(row => ({
+      id: row.get('ID'),
+      referencia: row.get('REFERENCIA'),
+      serial: row.get('SERIAL'),
+      estado: row.get('ESTADO'),
+      cliente: row.get('CLIENTE'),
+      usuarioDespacho: row.get('USUARIO_DESPACHO'),
+      usuarioPlanta: row.get('USUARIO_PLANTA'),
+      usuarioInstalacion: row.get('USUARIO_INSTALACION'),
+      usuarioDesinstalacion: row.get('USUARIO_DESINSTALACION'),
+      placa: row.get('PLACA'),
+      kilometrajeInstalacion: row.get('KILOMETRAJE_INSTALACION'),
+      kilometrajeDesinstalacion: row.get('KILOMETRAJE_DESINSTALACION'),
+      fechaAlmacen: row.get('FECHA_ALMACEN'),
+      fechaDespacho: row.get('FECHA_DESPACHO'),
+      fechaInstalacion: row.get('FECHA_INSTALACION'),
+      fechaDesinstalacion: row.get('FECHA_DESINSTALACION'),
+      horaAlmacen: row.get('HORA_ALMACEN'),
+      horaDespacho: row.get('HORA_DESPACHO'),
+      horaInstalacion: row.get('HORA_INSTALACION'),
+      horaDesinstalacion: row.get('HORA_DESINSTALACION')
+    }));
+
+    res.json({ success: true, data });
+
+  } catch (error) {
+    console.error('Error al obtener registros:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Error al obtener registros',
+      details: error.message 
+    });
+  }
+});
+
+/**
+ * Obtiene estadísticas de escaneos
+ * GET /api/stats
+ */
+app.get('/api/stats', async (req, res) => {
+  try {
+    const cliente = req.query.cliente || '';
+    const userEmail = req.query.userEmail || '';
+    
+    const doc = await getGoogleSheet();
+    let sheet;
+    
+    if (cliente) {
+      sheet = await getOrCreateClientRecordsSheet(doc, cliente);
+    } else {
+      sheet = await getOrCreateRecordsSheet(doc);
+    }
+
+    let rows = await sheet.getRows();
+    if (userEmail && !cliente) {
+      rows = rows.filter(row => isUserInRecord(row, userEmail));
+    }
+    const today = new Date().toLocaleDateString('es-ES');
+
+    const stats = {
+      total: rows.length,
+      enAlmacen: 0,
+      despachados: 0,
+      instalados: 0,
+      desinstalados: 0,
+      today: 0
+    };
+
+    rows.forEach(row => {
+      const estado = row.get('ESTADO');
+      
+      if (estado === 'EN ALMACEN') {
+        stats.enAlmacen++;
+      } else if (estado === 'DESPACHADO') {
+        stats.despachados++;
+      } else if (estado === 'INSTALADO') {
+        stats.instalados++;
+      } else if (estado === 'DESINSTALADO') {
+        stats.desinstalados++;
+      }
+      
+      if (row.get('FECHA_ALMACEN') === today || row.get('FECHA_DESPACHO') === today || 
+          row.get('FECHA_INSTALACION') === today || row.get('FECHA_DESINSTALACION') === today) {
+        stats.today++;
+      }
+    });
+
+    res.json({ success: true, data: stats });
+
+  } catch (error) {
+    console.error('Error al obtener estadísticas:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Error al obtener estadísticas',
+      details: error.message 
+    });
+  }
+});
+
+/**
+ * Obtiene proyecciones de pedidos y duración de filtros
+ * GET /api/projections
+ */
+app.get('/api/projections', async (req, res) => {
+  try {
+    const cliente = req.query.cliente || '';
+    const authUser = req.headers['x-auth-user'] || '';
+    const authPassword = req.headers['x-auth-password'] || '';
+
+    const doc = await getGoogleSheet();
+
+    // Validar que el usuario autenticado sea superadmin o administrador
+    const authData = await validateAdminOrSuperadminCredentials(doc, authUser, authPassword);
+    if (!authData) {
+      return res.status(401).json({ success: false, message: 'No autorizado' });
+    }
+
+    const { tipo: authTipo, cliente: authCliente } = authData;
+    
+    // Recopilar todos los registros solo de la hoja REGISTROS global
+    const globalSheet = await getOrCreateRecordsSheet(doc);
+    let allRows = await globalSheet.getRows();
+    
+    // Filtrar por cliente si se especifica
+    if (cliente) {
+      allRows = allRows.filter(row => {
+        const rowCliente = row.get('CLIENTE') || '';
+        return rowCliente.toUpperCase() === cliente.toUpperCase();
+      });
+    } else if (authTipo !== 'super') {
+      // Administrador solo puede ver su cliente
+      allRows = allRows.filter(row => {
+        const rowCliente = row.get('CLIENTE') || '';
+        return rowCliente.toUpperCase() === authCliente.toUpperCase();
+      });
+    }
+
+    // PASO 1: Calcular duración promedio por (cliente, referencia) usando registros desinstalados
+    const durationsByClientRef = {}; // Key: "cliente|referencia", Value: array de duraciones en días
+    
+    allRows.forEach(row => {
+      const estado = row.get('ESTADO');
+      const cliente = row.get('CLIENTE') || 'Sin Cliente';
+      const referencia = row.get('REFERENCIA');
+      const fechaInst = row.get('FECHA_INSTALACION');
+      const fechaDesinst = row.get('FECHA_DESINSTALACION');
+
+      // Recopilar datos de filtros desinstalados para calcular promedios
+      if (estado === 'DESINSTALADO' && fechaInst && fechaDesinst) {
+        const dateInst = parseSpanishDate(fechaInst);
+        const dateDesinst = parseSpanishDate(fechaDesinst);
+        
+        if (dateInst && dateDesinst) {
+          const diasInstalado = Math.round((dateDesinst - dateInst) / (1000 * 60 * 60 * 24));
+          
+          // Solo registrar si tiene duración válida (> 0)
+          if (diasInstalado > 0) {
+            const key = `${cliente}|${referencia}`;
+            if (!durationsByClientRef[key]) {
+              durationsByClientRef[key] = [];
+            }
+            durationsByClientRef[key].push(diasInstalado);
+          }
+        }
+      }
+    });
+
+    // Calcular promedios por (cliente, referencia)
+    const avgDurationByClientRef = {};
+    for (const key in durationsByClientRef) {
+      const durations = durationsByClientRef[key];
+      const avg = durations.reduce((a, b) => a + b, 0) / durations.length;
+      avgDurationByClientRef[key] = Math.round(avg);
+    }
+
+    // PASO 2: Para cada filtro instalado, calcular fecha estimada de reemplazo
+    const nextReplacements = [];
+    
+    allRows.forEach(row => {
+      const estado = row.get('ESTADO');
+      const cliente = row.get('CLIENTE') || 'Sin Cliente';
+      const referencia = row.get('REFERENCIA');
+      const serial = row.get('SERIAL');
+      const placa = row.get('PLACA');
+      const fechaInst = row.get('FECHA_INSTALACION');
+
+      if (estado === 'INSTALADO' && fechaInst && (cliente || referencia)) {
+        const dateInst = parseSpanishDate(fechaInst);
+        if (dateInst) {
+          const key = `${cliente}|${referencia}`;
+          
+          // Obtener duración promedio para esta (cliente, referencia), default 90 días si no hay histórico
+          const avgDuration = avgDurationByClientRef[key] || 90;
+
+          // Calcular fecha estimada de reemplazo
+          const estimatedDate = new Date(dateInst);
+          estimatedDate.setDate(estimatedDate.getDate() + avgDuration);
+
+          nextReplacements.push({
+            cliente,
+            referencia,
+            serial,
+            placa,
+            fechaInstalacion: fechaInst,
+            duracionPromedioDias: avgDuration,
+            fechaEstimadaReemplazo: formatDateToSpanish(estimatedDate)
+          });
+        }
+      }
+    });
+
+    // Ordenar por fecha estimada de reemplazo (ascendente)
+    nextReplacements.sort((a, b) => {
+      const dateA = parseSpanishDate(a.fechaEstimadaReemplazo);
+      const dateB = parseSpanishDate(b.fechaEstimadaReemplazo);
+      return dateA - dateB;
+    });
+
+    // Calcular estadísticas generales
+    const allDurations = Object.values(durationsByClientRef).flat();
+    const avgDaysDuration = allDurations.length > 0
+      ? Math.round(allDurations.reduce((sum, d) => sum + d, 0) / allDurations.length)
+      : 0;
+
+    res.json({
+      success: true,
+      data: {
+        nextReplacements: nextReplacements,
+        stats: {
+          avgDaysDuration,
+          totalFiltersAnalyzed: allDurations.length,
+          nextReplacementsCount: nextReplacements.length
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Error al obtener proyecciones:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al obtener proyecciones',
+      details: error.message
+    });
+  }
+});
+
+/**
+ * Función auxiliar para parsear fechas en formato español dd/mm/yyyy
+ */
+/**
+ * Convierte una fecha JavaScript a formato español DD/MM/YYYY
+ */
+function formatDateToSpanish(date) {
+  if (!date) return '';
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const year = date.getFullYear();
+  return `${day}/${month}/${year}`;
+}
+
+function parseSpanishDate(dateString) {
+  if (!dateString) return null;
+  const parts = dateString.split('/');
+  if (parts.length !== 3) return null;
+  const day = parseInt(parts[0]);
+  const month = parseInt(parts[1]) - 1; // Los meses en JS van de 0-11
+  const year = parseInt(parts[2]);
+  return new Date(year, month, day);
+}
+
+/**
+ * Función auxiliar para formatear mes-año
+ */
+function formatMonthYear(monthYear) {
+  const months = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+  const [year, month] = monthYear.split('-');
+  return `${months[parseInt(month) - 1]} ${year}`;
+}
+
+/**
+ * POST /api/save-installer
+ * Guarda el nombre del instalador en la hoja REGISTROS
+ */
+app.post('/api/save-installer', async (req, res) => {
+  try {
+    const { installerName } = req.body;
+
+    if (!installerName || typeof installerName !== 'string' || !installerName.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'El nombre del instalador es requerido'
+      });
+    }
+
+    // Conectar con Google Sheets
+    const auth = new JWT({
+      email: process.env.GOOGLE_CLIENT_EMAIL,
+      key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+      scopes: [
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/drive.file',
+      ],
+    });
+
+    const doc = new GoogleSpreadsheet(process.env.GOOGLE_SPREADSHEET_ID, auth);
+    await doc.loadInfo();
+
+    // Obtener la hoja REGISTROS
+    const registrosSheet = await getOrCreateRecordsSheet(doc);
+    await registrosSheet.loadHeaderRow();
+
+    // Agregar fila con el nombre del instalador y timestamp
+    const timestamp = new Date().toLocaleString('es-ES', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    });
+
+    await registrosSheet.addRow({
+      'NOMBRE_INSTALADOR': installerName.trim(),
+      'FECHA_ALMACEN': timestamp.split(' ')[0],
+      'HORA_ALMACEN': timestamp.split(' ')[1]
+    });
+
+    console.log(`✅ Nombre del instalador guardado: ${installerName}`);
+    res.json({
+      success: true,
+      message: 'Nombre del instalador guardado correctamente',
+      installerName: installerName.trim()
+    });
+
+  } catch (error) {
+    console.error('❌ Error al guardar el nombre del instalador:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Error al guardar el nombre del instalador'
+    });
+  }
+});
+
+// Manejo de rutas no encontradas
+app.use((req, res) => {
+  res.status(404).json({ 
+    success: false, 
+    error: 'Ruta no encontrada' 
+  });
+});
+
+// Iniciar servidor
+app.listen(PORT, () => {
+  console.log(`✅ Servidor ejecutándose en http://localhost:${PORT}`);
+  console.log(`📊 Ambiente: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`🚀 API lista para recibir solicitudes`);
+});

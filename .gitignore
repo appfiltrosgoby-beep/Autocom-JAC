@@ -29,7 +29,6 @@ service-account.json
 autocom-jac-*.json
 autocom-*.json
 GOOGLE_PRIVATE_KEY_*.txt
-*.json
 
 # Build y cache
 dist/

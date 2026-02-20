@@ -12,12 +12,12 @@ se detalla la información que debe incluir:
 
 1.1 Propósito
    - Documento de especificación de requisitos para el Sistema de Trazabilidad con QR
-   - Audiencia: Equipo de desarrollo, stakeholders de Industrias Goby, clientes
+   - Audiencia: Equipo de desarrollo, stakeholders de Autocom, clientes
    - Contexto: Aplicación web para escaneo de códigos QR con registro en Google Sheets
-     facilitando la trazabilidad de filtros y productos Goby
+     facilitando la trazabilidad de productos Autocom
 
 1.2 Alcance
-   - El software es una aplicación web para escaneo de códigos QR en Industrias Goby sas
+   - El software es una aplicación web para escaneo de códigos QR en Autocom
    - Objetivos:
      * Permitir escaneo rápido y confiable de códigos QR
      * Registrar automáticamente escaneos en Google Sheets
@@ -1205,8 +1205,8 @@ E. CONTROL DE VERSIONES
 
    Versión | Fecha | Autor | Cambios
    --------|-------|-------|---------------------------
-   1.0     | 2026-02-09 | Equipo Goby | Versión inicial del SRS
-   1.1     | 2026-02-09 | Equipo Goby | Guardado dual, sincronización hojas
+   1.0     | 2026-02-09 | Equipo Autocom | Versión inicial del SRS
+   1.1     | 2026-02-09 | Equipo Autocom | Guardado dual, sincronización hojas
    2.0     | TBD | TBD | Nuevas funcionalidades
 
 CAMBIOS VERSIÓN 1.1 (2026-02-09):
@@ -1404,8 +1404,8 @@ Próximas Acciones:
 CONTACTO Y MANTENIMIENTO
 ================================================================================
 
-Propietario del Documento: [Equipo de Desarrollo Goby]
-Email: [equipo@goby.com]
+Propietario del Documento: [Equipo de Desarrollo Autocom]
+Email: [equipo@autocom.com]
 Última actualización: 2026-02-09
 Próxima revisión: Post-Sprint 1 (aprox. 2026-02-23)
 Frecuencia de revisión: Bi-semanal durante desarrollo

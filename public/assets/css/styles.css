@@ -22,9 +22,9 @@
     --info-color: #5BC2E7;
     
     /* Colores de fondo */
-    --bg-primary: #ffffff;
-    --bg-secondary: #f9fafb;
-    --bg-tertiary: #f3f4f6;
+    --bg-primary: #FFFFFF;
+    --bg-secondary: #F8F9FA;
+    --bg-tertiary: #F0F1F3;
     --bg-dark: #1f2937;
     
     /* Colores de texto */
@@ -60,14 +60,14 @@
 }
 
 body {
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    font-weight: 600;
-    background: linear-gradient(135deg, #C41E3A 0%, #A01428 100%);
+    font-family: 'Segoe UI', 'Helvetica Neue', Verdana, sans-serif;
+    font-weight: 500;
+    background: linear-gradient(135deg, #F5E6E7 0%, #FFE1E1 50%, #F8E8E9 100%);
     color: var(--text-primary);
     line-height: 1.6;
     min-height: 100vh;
     padding: 0;
-    padding-bottom: 80px; /* Espacio para el menú inferior */
+    padding-bottom: 80px;
 }
 
 /* ============================================
@@ -85,8 +85,8 @@ body {
     border-radius: 0;
     padding: var(--spacing-md);
     margin-bottom: 0;
-    box-shadow: var(--shadow-md);
-    border-bottom: 4px solid var(--accent-gold);
+    box-shadow: 0 2px 8px rgba(196, 30, 58, 0.12);
+    border-bottom: 3px solid var(--primary-color);
     position: sticky;
     top: 0;
     z-index: 100;
@@ -107,21 +107,23 @@ body {
 }
 
 .logo img {
-    height: 45px;
+    height: 55px;
     width: auto;
+    object-fit: contain;
+    filter: drop-shadow(0 2px 6px rgba(196, 30, 58, 0.15));
+}
+
+.logo svg {
+    filter: drop-shadow(0 2px 4px rgba(196, 30, 58, 0.15));
 }
 
 .logo h1 {
-    color: var(--autocom-black);
-    font-weight: 700;
-}
-
-.logo h1 {
-    font-size: 1.1rem;
+    font-size: 1.25rem;
     font-weight: 700;
     color: var(--autocom-black);
     margin: 0;
-}}
+    letter-spacing: -0.5px;
+}
 
 .header-stats {
     display: flex;
@@ -144,6 +146,7 @@ body {
     font-size: 1.5rem;
     font-weight: 700;
     color: var(--primary-color);
+    text-shadow: 0 1px 2px rgba(196, 30, 58, 0.1);
 }
 
 .main-content {
@@ -185,11 +188,11 @@ body {
     left: 0;
     right: 0;
     background: var(--bg-primary);
-    border-top: 2px solid var(--accent-gold);
+    border-top: 3px solid var(--primary-color);
     display: flex;
     justify-content: space-around;
     padding: var(--spacing-sm) 0;
-    box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.1);
+    box-shadow: 0 -2px 10px rgba(196, 30, 58, 0.1);
     z-index: 1000;
 }
 
@@ -1114,7 +1117,7 @@ input:checked + .slider:before {
     left: 0;
     width: 100%;
     height: 100%;
-    background: linear-gradient(135deg, #5BC2E7 0%, #1565C0 100%);
+    background: linear-gradient(135deg, #C41E3A 0%, #A01428 100%);
     z-index: 1000;
     justify-content: center;
     align-items: center;
@@ -1299,8 +1302,8 @@ input:checked + .slider:before {
 }
 
 .role-badge.admin {
-    background: var(--accent-gold);
-    color: var(--autocom-black);
+    background: var(--primary-color);
+    color: white;
 }
 
 .role-badge.user {
@@ -1358,7 +1361,7 @@ input:checked + .slider:before {
    ============================================ */
 
 .total-card {
-    background: linear-gradient(135deg, #1565C0 0%, #5BC2E7 100%);
+    background: linear-gradient(135deg, #C41E3A 0%, #D1354A 100%);
     border-radius: var(--border-radius);
     padding: var(--spacing-lg);
     margin-bottom: var(--spacing-lg);
@@ -1471,7 +1474,7 @@ input:checked + .slider:before {
     color: var(--text-primary);
     font-size: 1.125rem;
     font-weight: 600;
-    border-bottom: 2px solid var(--accent-gold);
+    border-bottom: 2px solid var(--primary-color);
     padding-bottom: var(--spacing-sm);
 }
 

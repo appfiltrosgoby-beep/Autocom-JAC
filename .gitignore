@@ -27,7 +27,7 @@ Thumbs.db
 credentials.json
 service-account.json
 autocom-jac-*.json
-qr-goby-*.json
+autocom-*.json
 GOOGLE_PRIVATE_KEY_*.txt
 *.json
 

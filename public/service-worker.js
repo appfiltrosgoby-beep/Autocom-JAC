@@ -17,6 +17,8 @@ const urlsToCache = [
     '/assets/images/icon-180.png',
     '/assets/images/icon-192.png',
     '/assets/images/icon-512.png',
+    '/assets/images/logo1.png',
+    '/assets/images/autocom_colombia_logo.jpg',
     'https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js',
     'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js'
 ];

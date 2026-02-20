@@ -245,7 +245,7 @@
                 const installerMessage = document.getElementById('installerMessage');
                 
                 // Cargar nombre guardado si existe
-                const savedInstaller = localStorage.getItem('goby_installer_name');
+                const savedInstaller = localStorage.getItem('autocom_installer_name');
                 if (savedInstaller) {
                     installerInput.value = savedInstaller;
                 }
@@ -274,7 +274,7 @@
                         const result = await response.json();
                         
                         if (result.success) {
-                            localStorage.setItem('goby_installer_name', installerName);
+                            localStorage.setItem('autocom_installer_name', installerName);
                             installerMessage.innerHTML = '<span style="color: #2e7d32; font-weight: bold;">✅ Datos guardados correctamente</span>';
                             installerInput.disabled = true;
                             installerForm.querySelector('button').disabled = true;

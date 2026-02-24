@@ -57,6 +57,20 @@ app.get('/manifest.json', (req, res) => {
   res.sendFile(path.join(publicPath, 'manifest.json'));
 });
 
+// Servir favicon.svg con el content-type correcto
+app.get('/favicon.svg', (req, res) => {
+  res.type('image/svg+xml');
+  res.set('Cache-Control', 'public, max-age=31536000, immutable');
+  res.sendFile(path.join(publicPath, 'favicon.svg'));
+});
+
+// Servir favicon.ico (fallback)
+app.get('/favicon.ico', (req, res) => {
+  res.type('image/svg+xml');
+  res.set('Cache-Control', 'public, max-age=31536000, immutable');
+  res.sendFile(path.join(publicPath, 'favicon.svg'));
+});
+
 // Servir Service Worker
 app.get('/service-worker.js', (req, res) => {
   res.type('application/javascript; charset=utf-8');

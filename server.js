@@ -64,6 +64,18 @@ app.get('/favicon.svg', (req, res) => {
   res.sendFile(path.join(publicPath, 'favicon.svg'));
 });
 
+// DEBUG: Endpoint para verificar variables de entorno (temporal)
+app.get('/api/debug-env', (req, res) => {
+  const vars = {
+    'GOOGLE_CLIENT_EMAIL': process.env.GOOGLE_CLIENT_EMAIL ? '✅ ' + process.env.GOOGLE_CLIENT_EMAIL : '❌ NO CONFIGURADA',
+    'GOOGLE_SPREADSHEET_ID': process.env.GOOGLE_SPREADSHEET_ID ? '✅ ' + process.env.GOOGLE_SPREADSHEET_ID : '❌ NO CONFIGURADA',
+    'GOOGLE_PRIVATE_KEY': process.env.GOOGLE_PRIVATE_KEY ? `✅ ${process.env.GOOGLE_PRIVATE_KEY.length} caracteres` : '❌ NO CONFIGURADA',
+    'NODE_ENV': process.env.NODE_ENV || 'NO CONFIGURADA',
+    'PORT': process.env.PORT || 'NO CONFIGURADA'
+  };
+  res.json(vars);
+});
+
 // Servir favicon.ico (fallback)
 app.get('/favicon.ico', (req, res) => {
   res.type('image/svg+xml');

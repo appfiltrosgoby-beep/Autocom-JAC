@@ -300,6 +300,14 @@ async function validateCredentials(usuario, tipo, password) {
             body: JSON.stringify({ usuario, tipo, password })
         });
 
+        if (!response.ok) {
+            const errorData = await response.json();
+            console.error('❌ Error del servidor:', errorData);
+            const errorMsg = errorData.error || errorData.message || 'Error del servidor';
+            showToast(`Error: ${errorMsg}`, 'error');
+            return { success: false, message: errorMsg };
+        }
+
         const data = await response.json();
         if (data && data.success) {
             return { 
@@ -311,9 +319,9 @@ async function validateCredentials(usuario, tipo, password) {
         }
         return { success: false, message: data && data.message ? data.message : '' };
     } catch (error) {
-        console.error('Error validando usuario:', error);
-        showToast('Error al validar usuario', 'error');
-        return { success: false };
+        console.error('❌ Error validando usuario:', error);
+        showToast('Error de conexión con el servidor', 'error');
+        return { success: false, message: 'Error de conexión' };
     }
 }
 

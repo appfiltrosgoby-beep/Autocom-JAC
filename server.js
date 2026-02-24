@@ -90,6 +90,16 @@ app.post('/api/validate-user', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Usuario, tipo y contraseña son requeridos' });
     }
 
+    // Validar que las variables de entorno estén configuradas
+    if (!process.env.GOOGLE_CLIENT_EMAIL || !process.env.GOOGLE_PRIVATE_KEY || !process.env.GOOGLE_SPREADSHEET_ID) {
+      console.error('❌ Variables de entorno de Google Sheets no configuradas');
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Error de configuración del servidor',
+        error: 'Google Sheets credentials not configured. Please check environment variables.' 
+      });
+    }
+
     const doc = await getGoogleSheet();
     const normalizedUser = normalizeUser(usuario);
     const normalizedType = normalizeType(tipo);
@@ -159,8 +169,14 @@ app.post('/api/validate-user', async (req, res) => {
       cliente: userClient 
     });
   } catch (error) {
-    console.error('Error al validar usuario:', error);
-    res.status(500).json({ success: false, error: 'Error al validar usuario' });
+    console.error('❌ Error al validar usuario:', error);
+    console.error('❌ Stack trace:', error.stack);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al validar usuario',
+      error: error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 });
 

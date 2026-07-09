@@ -44,7 +44,7 @@ se detalla la información que debe incluir:
    - Superadmin: Administrador con acceso total al sistema
    - Admin: Administrador restringido a su cliente
    - Mecánico: Operario que realiza escaneos
-   - Planta: Usuario de planta con permisos de escaneo
+   - Despacho: Usuario operativo que realiza escaneos y despachos
    - Cliente: Entidad organizacional en Google Sheets
    - Trazabilidad: Capacidad de rastrear un producto desde origen a destino
    - Google Sheets: Hoja de cálculo en línea de Google
@@ -115,17 +115,17 @@ se detalla la información que debe incluir:
    
    2. Autenticación y Gestión de Usuarios
       - Login con usuario y contraseña
-      - Roles diferenciados (Superadmin, Admin, Mecánico, Planta)
+      - Roles diferenciados (Superadmin, Admin, Mecánico, Despacho)
       - Control de sesión y timeout
       - Cambio de rol sin cerrar sesión
    
-   3. Registro de Escaneos (Guardado Dual)
-      - Almacenamiento automático en Google Sheets
-      - Guardado simultáneo en hoja global y hoja del cliente
-      - Sincronización bidireccional entre hojas
+   3. Registro de Escaneos y Sincronización
+      - Almacenamiento inicial en la hoja global REGISTROS
+      - Sincronización con la hoja del cliente a medida que cambia el estado
+      - Consistencia entre hoja global y hoja del cliente
       - Timestamp de fecha y hora
       - Datos del usuario responsable
-      - Datos del cliente asociado
+      - Datos del cliente asociado cuando corresponde
       - Verificación automática de estructura de hojas
    
    4. Visualización de Registros
@@ -151,11 +151,16 @@ se detalla la información que debe incluir:
       - Eliminar usuarios
       - Asignar roles y clientes
 
-   8. Proyecciones (Superadmin)
-      - Visualizar proyecciones de pedidos por mes
-      - Calcular duración promedio de filtros por kilometraje
+   8. Proyecciones de Reemplazo de Filtros (Superadmin)
+      - Visualizar próximos reemplazos de filtros instalados
+      - Calcular duración promedio por cliente y referencia
       - Filtrar por cliente y referencia
       - Mostrar tablas y gráficas de proyección y duración
+
+   9. Gestión de Clientes (Superadmin)
+      - Listar, crear, actualizar y eliminar clientes
+      - Crear automáticamente hojas de usuarios y registros por cliente
+      - Renombrar y limpiar hojas asociadas cuando cambia el cliente
 
 2.3 Características del Usuario
    TIPOS DE USUARIOS:
@@ -186,15 +191,15 @@ se detalla la información que debe incluir:
       - Nivel de experiencia: Bajo-Medio
       - Frecuencia: Alta (uso diario)
    
-   4. PLANTA
+   4. DESPACHO
       - Similar a mecánico
-      - Acceso para escaneo en planta
+      - Acceso para escaneo y flujo de despacho
       - Visualización de registros
       - Ingreso: Opción "Usuarios" (el sistema lo identifica automáticamente)
       - Nivel de experiencia: Bajo
       - Frecuencia: Alta (uso diario)
    
-   NOTA: Los usuarios mecánico y planta comparten la misma opción de ingreso.
+   NOTA: Los usuarios mecánico y despacho comparten la misma opción de ingreso.
    El sistema diferencia automáticamente el tipo basado en los datos en Google Sheets.
 
 2.4 Restricciones
@@ -284,53 +289,53 @@ se detalla la información que debe incluir:
    MÓDULO 1: AUTENTICACIÓN Y CONTROL DE ACCESO
    ================================================================================
    
-   RF-001: Login de Usuario
-   Prioridad: ALTA | Estado: Implementado
-   Descripción: El sistema debe permitir que usuarios válidos se autentiquen mediante
-   usuario y contraseña. Los usuarios tipo mecánico y planta ingresan por la misma
-   opción, el sistema los diferencia automáticamente.
-   Entrada: Usuario (string), Contraseña (string), Flujo ('user'|'administrador')
-   Procesamiento:
-     1. Validar formato de entrada
-     2. Consultar Google Sheets para verificar credenciales
-     3. Si flujo='user': aceptar tipo mecánico O planta
-     4. Si flujo='administrador': aceptar tipo administrador O super
-     5. Generar sesión/token con el tipo real del usuario
-   Salida: Token de sesión, rol del usuario, tipo real, cliente asignado, mensaje de éxito/error
-   Criterios de aceptación:
-     - Login exitoso con credenciales correctas
-     - Login rechazado con credenciales incorrectas
-     - Mecánico y planta pueden ingresar por opción "usuarios"
-     - Superadmin puede ingresar por opción "administrador"
-     - Mensaje de error específico por error
-     - Sesión persistente en localStorage
-   
-   RF-002: Logout de Usuario
-   Prioridad: ALTA | Estado: Aprobado
-   Descripción: El sistema debe permitir que el usuario cierre sesión
-   Entrada: Click en botón Logout
-   Procesamiento:
-     1. Limpiar datos de sesión
-     2. Limpiar localStorage
-     3. Regresar a pantalla de login
-   Salida: Pantalla de login mostrada, sesión eliminada
-   Criterios de aceptación:
-     - No se puede acceder a funcionalidades tras logout
-     - Datos sensibles eliminados de memoria
-   
-   RF-003: Control de Acceso por Rol
-   Prioridad: ALTA | Estado: Aprobado
-   Descripción: El sistema debe aplicar permisos según el rol del usuario
-   Entrada: Rol del usuario (superadmin|admin|mecanico|planta)
-   Procesamiento:
-     1. Validar rol del usuario
-     2. Aplicar permisos en interfaz (mostrar/ocultar opciones)
-     3. Validar en servidor antes de procesar solicitudes
-   Salida: Interfaz personalizada por rol, solicitudes rechazadas si no autorizado
-   Criterios de aceptación:
-     - Superadmin: acceso a todas las funcionales
-     - Admin: acceso a su cliente únicamente
-     - Mecánico/Planta: acceso solo a escaneo y registros propios
+    RF-001: Login de Usuario
+    Prioridad: ALTA | Estado: Implementado
+    Descripción: El sistema debe permitir que usuarios válidos se autentiquen mediante
+    usuario y contraseña. Los usuarios tipo mecánico y despacho ingresan por la misma
+    opción, el sistema los diferencia automáticamente.
+    Entrada: Usuario (string), Contraseña (string), Flujo ('user'|'administrador')
+    Procesamiento:
+       1. Validar formato de entrada
+       2. Consultar Google Sheets para verificar credenciales
+       3. Si flujo='user': aceptar tipo mecánico O despacho
+       4. Si flujo='administrador': aceptar tipo administrador O super
+       5. Generar sesión/token con el tipo real del usuario
+    Salida: Token de sesión, rol del usuario, tipo real, cliente asignado, mensaje de éxito/error
+    Criterios de aceptación:
+       - Login exitoso con credenciales correctas
+       - Login rechazado con credenciales incorrectas
+       - Mecánico y despacho pueden ingresar por opción "usuarios"
+       - Superadmin puede ingresar por opción "administrador"
+       - Mensaje de error específico por error
+       - Sesión persistente en localStorage
+
+    RF-002: Logout de Usuario
+    Prioridad: ALTA | Estado: Aprobado
+    Descripción: El sistema debe permitir que el usuario cierre sesión
+    Entrada: Click en botón Logout
+    Procesamiento:
+       1. Limpiar datos de sesión
+       2. Limpiar localStorage
+       3. Regresar a pantalla de login
+    Salida: Pantalla de login mostrada, sesión eliminada
+    Criterios de aceptación:
+       - No se puede acceder a funcionalidades tras logout
+       - Datos sensibles eliminados de memoria
+
+    RF-003: Control de Acceso por Rol
+    Prioridad: ALTA | Estado: Aprobado
+    Descripción: El sistema debe aplicar permisos según el rol del usuario
+    Entrada: Rol del usuario (superadmin|admin|mecanico|despacho)
+    Procesamiento:
+       1. Validar rol del usuario
+       2. Aplicar permisos en interfaz (mostrar/ocultar opciones)
+       3. Validar en servidor antes de procesar solicitudes
+    Salida: Interfaz personalizada por rol, solicitudes rechazadas si no autorizado
+    Criterios de aceptación:
+       - Superadmin: acceso a todas las funcionales
+       - Admin: acceso a su cliente únicamente
+       - Mecánico/Despacho: acceso solo a escaneo y registros propios
    
    RF-004: Gestión de Sesión
    Prioridad: ALTA | Estado: Aprobado
@@ -546,10 +551,10 @@ se detalla la información que debe incluir:
      - Datos precisos y actualizados
      - Incluir porcentaje del total
 
-    RF-028: Proyecciones de Reemplazo de Filtros por Cliente
-    Prioridad: MEDIA | Estado: Implementado
-    Descripción: El sistema debe proyectar fechas de reemplazo para filtros actualmente
-    instalados, basándose en la duración histórica promedio de cada referencia por cliente.
+   RF-028: Proyecciones de Reemplazo de Filtros por Cliente
+   Prioridad: MEDIA | Estado: Implementado
+   Descripción: El sistema debe proyectar fechas estimadas de reemplazo para filtros actualmente
+   instalados, basándose en la duración histórica promedio de cada referencia por cliente.
     Entrada: Registros de la hoja global REGISTROS, filtros de cliente y referencia (opcional)
     Procesamiento:
        1. Consultar la hoja global REGISTROS (todos los registros)
@@ -608,49 +613,55 @@ se detalla la información que debe incluir:
    
    RF-020: Listar Usuarios
    Prioridad: ALTA | Estado: Aprobado
-   Descripción: Mostrar tabla con todos los usuarios del sistema
+   Descripción: Mostrar tabla con todos los usuarios del sistema según el rol
    Entrada: Acceso a vista de Usuarios por Superadmin
    Procesamiento:
-     1. Validar que usuario es superadmin
-     2. Consultar todos los usuarios de Google Sheets
-     3. Crear tabla con información
+     1. Validar que usuario es superadmin o administrador
+     2. Consultar usuarios globales si es superadmin
+     3. Consultar usuarios de su cliente si es administrador
+     4. Crear tabla con información
    Salida: Tabla: Usuario | Tipo | Cliente | Acciones
    Criterios de aceptación:
-     - Solo superadmin puede ver
+     - Superadmin ve todos los usuarios
+     - Administrador ve solo los usuarios de su cliente
      - Información completa de usuarios
-   
+
    RF-021: Crear Nuevo Usuario
    Prioridad: ALTA | Estado: Aprobado
-   Descripción: Permitir que superadmin cree nuevos usuarios
+   Descripción: Permitir que superadmin o administrador cree nuevos usuarios
    Entrada: Formulario: usuario, contraseña, tipo, cliente
    Procesamiento:
      1. Validar campos requeridos
      2. Validar que usuario no existe
-     3. Guardar en Google Sheets
-     4. Asignar a hoja del cliente
+     3. Validar permisos por cliente
+     4. Guardar en Google Sheets
+     5. Asignar a hoja del cliente o global según tipo
    Salida: Confirmación de creación, usuario disponible para login
    Criterios de aceptación:
      - Validación de campos
      - Usuario único
      - Contraseña almacenada (considerar hash futuro)
+     - Administrador solo crea usuarios de su cliente
      - Mensaje de éxito
-   
+
    RF-022: Actualizar Usuario
    Prioridad: MEDIA | Estado: Aprobado
-   Descripción: Permitir edición de datos de usuarios existentes
+   Descripción: Permitir edición de datos de usuarios existentes por superadmin o administrador
    Entrada: Formulario pre-cargado con datos del usuario
    Procesamiento:
      1. Validar cambios
-     2. Actualizar fila en Google Sheets
-     3. Refrescar tabla
+     2. Validar permisos del cliente
+     3. Actualizar fila en Google Sheets
+     4. Refrescar tabla
    Salida: Datos actualizados del usuario
    Criterios de aceptación:
      - Cambios persistentes
      - Validación de tipos
-   
+     - Administrador solo edita usuarios de su cliente
+
    RF-023: Eliminar Usuario
    Prioridad: MEDIA | Estado: Aprobado
-   Descripción: Permitir eliminación de usuarios
+   Descripción: Permitir eliminación de usuarios solo para superadmin
    Entrada: Click en botón "Eliminar" con confirmación
    Procesamiento:
      1. Mostrar confirmación
@@ -659,7 +670,7 @@ se detalla la información que debe incluir:
    Salida: Usuario removido del sistema
    Criterios de aceptación:
      - Confirmación obligatoria
-     - Usuario no puede más loguerse
+     - Usuario no puede más loguearse
      - Registros históricos se mantienen
    
    ================================================================================
@@ -774,7 +785,7 @@ se detalla la información que debe incluir:
       - Validación de permisos en servidor (no solo cliente)
       - Superadmin: acceso total
       - Admin: acceso solo a su cliente
-      - Mecánico/Planta: acceso solo a escaneo
+      - Mecánico/Despacho: acceso solo a escaneo
       - Restricción de datos por cliente
       
       NRF-009: Encriptación de Datos
@@ -1029,39 +1040,34 @@ A. CASOS DE USO PRINCIPALES
 ================================================================================
 
 CASO DE USO 1: Escaneo de Código QR por Operario
-   Actor Primario: Mecánico / Planta
-   Precondición: Usuario autenticado
-   Flujo Principal:
-     1. Usuario entra a vista de Escaneo
-     2. Hace click en "Iniciar Escaneo"
-     3. Navegador solicita permisos de cámara
-     4. Usuario acepta permisos
-     5. Usuario apunta cámara al código QR
-     6. Sistema detecta y decodifica QR
-     7. Sistema registra en Goo (Mecánico/Planta)
-   Actor Primario: Mecánico o Planta
-   Precondición: Usuario no autenticado
-CASO DE USO 2   
-   Flujo Principal:
-     1. Usuario abre aplicación
-     2. Ve modal de login
-     3. Selecciona opción "Usuarios"
-     4. Ingresa usuario y contraseña
-     5. Hace click en "Ingresar"
-     6. Sistema valida contra Google Sheets
-     7. Sistema identifica si es mecánico o planta automáticamente
-     8. Sistema crea sesión con rol 'user'
-     9. Interfaz muestra funcionalidades de usuario
-   Postcondición: Usuario autenticado como mecánico o planta
-   Notas: El sistema diferencia el tipo internamente pero ambos tienen
-   los mismos permisos de acceso (rol 'user')
-     3. Selecciona tipo de usuario
-     4. Ingresa usuario y contraseña
-     5. Hace click en "Ingresar"
-     6. Sistema valida contra Google Sheets
-     7. Sistema crea sesión
-     8. Interfaz personaliza por rol
-   Postcondición: Usuario autenticado
+    Actor Primario: Mecánico / Despacho
+    Precondición: Usuario autenticado
+    Flujo Principal:
+       1. Usuario entra a vista de Escaneo
+       2. Hace click en "Iniciar Escaneo"
+       3. Navegador solicita permisos de cámara
+       4. Usuario acepta permisos
+       5. Usuario apunta cámara al código QR
+       6. Sistema detecta y decodifica QR
+       7. Sistema registra en Google Sheets
+    Postcondición: Registro guardado y resultado visible
+
+CASO DE USO 2: Inicio de Sesión de Usuario
+    Actor Primario: Mecánico o Despacho
+    Precondición: Usuario no autenticado
+    Flujo Principal:
+       1. Usuario abre aplicación
+       2. Ve modal de login
+       3. Selecciona opción "Usuarios"
+       4. Ingresa usuario y contraseña
+       5. Hace click en "Ingresar"
+       6. Sistema valida contra Google Sheets
+       7. Sistema identifica si es mecánico o despacho automáticamente
+       8. Sistema crea sesión con rol 'user'
+       9. Interfaz muestra funcionalidades de usuario
+    Postcondición: Usuario autenticado como mecánico o despacho
+    Notas: El sistema diferencia el tipo internamente pero ambos tienen
+    los mismos permisos de acceso (rol 'user')
 
 CASO DE USO 3: Crear Usuario (Superadmin)
    Actor Primario: Superadmin
@@ -1092,7 +1098,7 @@ HOJA GLOBAL: "USUARIOS"
    Descripción: Almacena TODOS los usuarios del sistema
    Columnas:
    - USUARIO: Nombre único del usuario (email o username)
-   - TIPO: super, administrador, mecanico, planta
+   - TIPO: super, administrador, mecanico, despacho
    - CONTRASEÑA: Texto plano (mejorar con hash en futuro)
    - CLIENTE: Nombre del cliente asociado
    Notas:
@@ -1104,7 +1110,7 @@ HOJA POR CLIENTE: "[CLIENTE]_USUARIOS"
    Descripción: Usuarios específicos de cada cliente
    Columnas:
    - USUARIO: Nombre del usuario
-   - TIPO: administrador, mecanico, planta (no incluye super)
+   - TIPO: administrador, mecanico, despacho (no incluye super)
    - CONTRASEÑA: Contraseña del usuario
    - CLIENTE: Nombre del cliente (redundante pero útil)
    Notas:
@@ -1119,9 +1125,14 @@ HOJA GLOBAL: "REGISTROS"
    - SERIAL: Serial del producto (ej: 202630010002)
    - ESTADO: EN ALMACEN | DESPACHADO | INSTALADO | DESINSTALADO
    - CLIENTE: Cliente asociado al registro (IMPORTANTE para filtrado)
+   - USUARIO_DESPACHO: Usuario que despacha el producto
    - USUARIO_PLANTA: Usuario que registró en almacén
    - USUARIO_INSTALACION: Usuario que instaló
    - USUARIO_DESINSTALACION: Usuario que desinstaló
+   - PLACA: Placa asociada a la instalación
+   - KILOMETRAJE_INSTALACION: Kilometraje al instalar
+   - KILOMETRAJE_DESINSTALACION: Kilometraje al desinstalar
+   - NOMBRE_INSTALADOR: Nombre del instalador
    - FECHA_ALMACEN: Fecha de registro en almacén
    - FECHA_DESPACHO: Fecha de despacho
    - FECHA_INSTALACION: Fecha de instalación
@@ -1134,13 +1145,15 @@ HOJA GLOBAL: "REGISTROS"
    - Vista consolidada para superadmin
    - Sincronizada con hojas de cliente
    - Columna CLIENTE agregada automáticamente si no existe
+   - Fuente única de verdad para el ciclo completo del producto
 
 HOJA POR CLIENTE: "[CLIENTE]_REGISTROS"
    Descripción: Registros específicos de cada cliente
    Columnas: (Idénticas a REGISTROS global)
    - ID: Identificador único dentro del cliente
    - REFERENCIA, SERIAL, ESTADO, CLIENTE
-   - USUARIO_PLANTA, USUARIO_INSTALACION, USUARIO_DESINSTALACION
+   - USUARIO_DESPACHO, USUARIO_PLANTA, USUARIO_INSTALACION, USUARIO_DESINSTALACION
+   - PLACA, KILOMETRAJE_INSTALACION, KILOMETRAJE_DESINSTALACION, NOMBRE_INSTALADOR
    - FECHA_ALMACEN, FECHA_DESPACHO, FECHA_INSTALACION, FECHA_DESINSTALACION
    - HORA_ALMACEN, HORA_DESPACHO, HORA_INSTALACION, HORA_DESINSTALACION
    Notas:
